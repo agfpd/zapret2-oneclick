@@ -135,7 +135,7 @@ try {
         'transaction must publish the staged payload'
     Assert-True (Test-Path -LiteralPath ([string]$transaction.State.backupRoot)) `
         'transaction must retain the old payload until commit'
-    Restore-Z2OUpgradeTransaction -Transaction $transaction
+    Restore-Z2OUpgradeTransaction -Transaction $transaction -SkipServiceActions
     Assert-True (Test-Path -LiteralPath (Join-Path $transactionInstall 'old.txt')) `
         'transaction rollback must restore the old payload'
     Assert-True (-not (Test-Path -LiteralPath $transaction.StatePath)) `

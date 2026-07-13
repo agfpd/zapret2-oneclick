@@ -532,21 +532,24 @@ function Set-Z2OUpgradePhase {
 }
 
 function Restore-Z2OUpgradeTransaction {
-    param([Parameter(Mandatory)]$Transaction)
+    param([Parameter(Mandatory)]$Transaction, [switch]$SkipServiceActions)
     $state = $Transaction.State
     $installRoot = [string]$state.installRoot
     $backupRoot = [string]$state.backupRoot
     Write-Warning 'The update failed; restoring the previous working installation.'
-    Remove-Z2OService -Name $script:Z2OServiceName
+    if (-not $SkipServiceActions) { Remove-Z2OService -Name $script:Z2OServiceName }
     Stop-Z2OInstallProcesses -InstallRoot $installRoot
     if (Test-Path -LiteralPath $backupRoot -PathType Container) {
         if (Test-Path -LiteralPath $installRoot -PathType Container) {
-            try { Remove-Z2OWinDivertService -InstallRoot $installRoot } catch { }
+            if (-not $SkipServiceActions) {
+                try { Remove-Z2OWinDivertService -InstallRoot $installRoot } catch { }
+            }
             Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction Stop
         }
         Move-Item -LiteralPath $backupRoot -Destination $installRoot -ErrorAction Stop
     }
-    if ([bool]$state.hadWorkingConfig -and (Test-Path -LiteralPath $installRoot -PathType Container)) {
+    if (-not $SkipServiceActions -and [bool]$state.hadWorkingConfig -and
+        (Test-Path -LiteralPath $installRoot -PathType Container)) {
         $activeConfig = Join-Path $installRoot 'runtime\active.conf'
         Test-Z2OWinwsConfig -InstallRoot $installRoot -ConfigPath $activeConfig
         Install-Z2OService -InstallRoot $installRoot -ConfigPath $activeConfig
