@@ -41,6 +41,9 @@ try {
     Assert-True ($quoted -eq "'a'`"'`"'b'") 'single quote must be wordexp-safe'
 
     $install = Join-Path $temp 'install'
+    Initialize-Z2OCygwinRuntime -InstallRoot $install
+    Assert-True (Test-Path -LiteralPath (Join-Path $install 'vendor\cygwin\tmp') -PathType Container) `
+        'Cygwin /tmp must be recreated when an archive omitted the empty directory'
     New-Item -ItemType Directory -Path (Join-Path $install 'config\hostlists') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $install 'vendor\zapret2\lua') -Force | Out-Null
     New-Item -ItemType Directory -Path (Join-Path $install 'vendor\zapret2\windivert.filter') -Force | Out-Null

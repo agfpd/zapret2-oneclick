@@ -31,6 +31,19 @@ try {
     Remove-Item -LiteralPath $binaryZip -Force -ErrorAction SilentlyContinue
     Compress-Archive -LiteralPath $stage -DestinationPath $binaryZip -CompressionLevel Optimal
 
+    # Packaging smoke test: inspect the artifact after a real ZIP round-trip.
+    # Source-tree tests cannot reveal omitted empty directories.
+    $smokeRoot = Join-Path $stageRoot 'zip-smoke'
+    Expand-Archive -LiteralPath $binaryZip -DestinationPath $smokeRoot -Force
+    $smokeProduct = Join-Path $smokeRoot 'zapret2-oneclick'
+    Import-Module (Join-Path $smokeProduct 'launcher\Zapret2OneClick.psm1') -Force
+    Test-Z2OVendorManifest -SourceRoot $smokeProduct
+    Initialize-Z2OCygwinRuntime -InstallRoot $smokeProduct
+    if (-not (Test-Path -LiteralPath (Join-Path $smokeProduct 'vendor\cygwin\tmp') -PathType Container)) {
+        throw 'Release ZIP smoke test failed: Cygwin /tmp was not recreated.'
+    }
+    Write-Host 'Release ZIP smoke test passed.' -ForegroundColor Green
+
     $artifacts = @($binaryZip)
     if (-not $SkipSourceArtifact) {
         & (Join-Path $Root 'build\Build-SourceArtifact.ps1') -Root $Root -Output $sourceZip -SourceCache $SourceCache

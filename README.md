@@ -100,3 +100,8 @@ Windows to assemble the portable runtime and source lock. Before packaging:
 Ship the generated source zip beside the binary release. Upstream versions and
 hashes are pinned in `checksums/upstream.lock.json`; binary releases must never
 be substituted from mirrors or third-party forks.
+
+Release acceptance must use the generated binary ZIP, never the source tree:
+copy it to a clean Windows path, extract it, and run `setup.cmd` exactly as an
+end user would. Empty runtime directories and other packaging-only differences
+are otherwise invisible to source-tree tests.

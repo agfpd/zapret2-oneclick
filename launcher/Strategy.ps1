@@ -8,6 +8,13 @@ function ConvertTo-Z2OCygwinPath {
     return ([string]$value).Trim()
 }
 
+function Initialize-Z2OCygwinRuntime {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    # Compress-Archive omits empty directories. Never rely on the source
+    # tree's empty vendor/cygwin/tmp surviving release packaging.
+    New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'vendor\cygwin\tmp') -Force | Out-Null
+}
+
 function Get-Z2OIpMode {
     try {
         $defaultRoute = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction Stop |
@@ -57,6 +64,7 @@ function Invoke-Z2OBlockcheckRun {
     $bash = Join-Path $InstallRoot 'vendor\cygwin\bin\bash.exe'
     $cygBin = Join-Path $InstallRoot 'vendor\cygwin\bin'
     $cygLocalBin = Join-Path $InstallRoot 'vendor\cygwin\usr\local\bin'
+    Initialize-Z2OCygwinRuntime -InstallRoot $InstallRoot
     $scriptPath = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path (Join-Path $zapretRoot 'blockcheck2.sh')
     $curlPath = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path (Join-Path $cygLocalBin 'curl.exe')
     $machineCyg = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path $machinePath
@@ -91,10 +99,29 @@ function Invoke-Z2OBlockcheckRun {
         $env:PATH = "$cygBin;$cygLocalBin;$env:SystemRoot\System32;$env:SystemRoot"
 
         Write-Host "blockcheck2: $($Group.displayName), test=$TestName, scan=$ScanLevel, repeats=$Repeats" -ForegroundColor Cyan
-        $process = Start-Process -FilePath $bash -ArgumentList @($scriptPath) -Wait -PassThru `
+        $process = Start-Process -FilePath $bash -ArgumentList @($scriptPath) -PassThru `
             -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath -NoNewWindow
-        if ($process.ExitCode -ne 0) {
-            throw "blockcheck2 failed for $($Group.id), exit $($process.ExitCode). Logs: $stdoutPath, $stderrPath"
+        # Force WinPS to retain the native process handle. Without this, polling
+        # WaitForExit(timeout) can leave ExitCode unavailable after the process exits.
+        $null = $process.Handle
+        $startedAt = Get-Date
+        $nextHeartbeat = 15
+        while (-not $process.WaitForExit(1000)) {
+            $elapsed = [int]((Get-Date) - $startedAt).TotalSeconds
+            if ($elapsed -ge $nextHeartbeat) {
+                Write-Host ("blockcheck2 is working: {0}, {1}s elapsed. Live log: {2}" -f `
+                    $Group.displayName, $elapsed, $stdoutPath) -ForegroundColor DarkGray
+                $nextHeartbeat += 15
+            }
+        }
+        # Flush redirected stream readers before inspecting the files/exit code.
+        $process.WaitForExit()
+        $exitCode = $process.ExitCode
+        if ($null -eq $exitCode) {
+            throw "blockcheck2 exit code was unavailable for $($Group.id). Logs: $stdoutPath, $stderrPath"
+        }
+        if ($exitCode -ne 0) {
+            throw "blockcheck2 failed for $($Group.id), exit $exitCode. Logs: $stdoutPath, $stderrPath"
         }
     }
     finally {
@@ -124,7 +151,7 @@ function Get-Z2ORequiredTestNames {
 
 function Get-Z2OCommonCandidates {
     param(
-        [Parameter(Mandatory)][object[]]$Records,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Records,
         [Parameter(Mandatory)]$Group,
         [Parameter(Mandatory)][ValidateSet('tls', 'quic')][string]$Kind,
         [Parameter(Mandatory)][int]$IpVersion
