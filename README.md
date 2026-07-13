@@ -11,9 +11,10 @@ the Windows acceptance host; they remain versioned data, not launcher code.
 1. Extract the release to a local directory on Windows 10/11 x86_64.
 2. Double-click `setup.cmd` and approve the UAC prompt.
 3. Leave other DPI-bypass tools and VPN clients stopped while blockcheck2
-   discovers and validates strategies. Discovery tests each requested protocol;
-   every selected candidate must then pass five validation attempts. A force
-   scan runs only for a service/protocol/IP family without a common candidate.
+   discovers and validates strategies. A short upstream candidate list is tried
+   first; every selected candidate must then pass five validation attempts. An
+   exhaustive standard force scan runs only for a service/protocol/IP family
+   without a common quick candidate.
 4. The launcher verifies every vendored file, installs into
    `%ProgramData%\zapret2-oneclick`, validates the generated winws2 config with
    `--dry-run`, and creates the auto-start `zapret2-oneclick` Windows service.

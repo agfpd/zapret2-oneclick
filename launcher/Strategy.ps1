@@ -162,6 +162,15 @@ function Get-Z2OExpectedKinds {
     return $kinds
 }
 
+function Get-Z2OProductionPenalty {
+    param([Parameter(Mandatory)][string]$Strategy)
+    # OOB candidates are useful diagnostics but can depend on blockcheck's
+    # temporary SYN/range capture details. Prefer an equally stable ordinary
+    # payload strategy for the long-running service.
+    if ($Strategy -match '--lua-desync=oob(?:[:\s]|$)') { return 100 }
+    return 0
+}
+
 function Get-Z2OCandidatesFromRun {
     param([Parameter(Mandatory)]$Run, [Parameter(Mandatory)]$Group)
     $versions = @($Run.Records | Select-Object -ExpandProperty IpVersion -Unique | Sort-Object)
@@ -169,7 +178,29 @@ function Get-Z2OCandidatesFromRun {
     $all = @()
     foreach ($version in $versions) {
         foreach ($kind in @(Get-Z2OExpectedKinds -Group $Group)) {
-            $all += @(Get-Z2OCommonCandidates -Records $Run.Records -Group $Group -Kind $kind -IpVersion $version)
+            $found = @(Get-Z2OCommonCandidates -Records $Run.Records -Group $Group -Kind $kind -IpVersion $version)
+            if ($kind -eq 'tls' -and $found.Count -eq 0 -and
+                @($Group.protocols) -contains 'https-tls12' -and @($Group.protocols) -contains 'https-tls13') {
+                $tls13Only = [pscustomobject]@{
+                    probeDomains = @($Group.probeDomains)
+                    protocols = @('https-tls13')
+                }
+                $found = @(Get-Z2OCommonCandidates -Records $Run.Records -Group $tls13Only -Kind $kind -IpVersion $version)
+                foreach ($candidate in $found) {
+                    $candidate | Add-Member -NotePropertyName Degraded -NotePropertyValue $true
+                    $candidate | Add-Member -NotePropertyName ValidatedProtocols -NotePropertyValue @('https-tls13')
+                }
+            }
+            foreach ($candidate in $found) {
+                if (-not ($candidate.PSObject.Properties.Name -contains 'Degraded')) {
+                    $candidate | Add-Member -NotePropertyName Degraded -NotePropertyValue $false
+                    $protocolNames = if ($kind -eq 'tls') {
+                        @($Group.protocols | Where-Object { $_ -like 'https-*' })
+                    } else { @('quic') }
+                    $candidate | Add-Member -NotePropertyName ValidatedProtocols -NotePropertyValue $protocolNames
+                }
+            }
+            $all += $found
         }
     }
     return $all
@@ -202,13 +233,25 @@ function Select-Z2OStableStrategies {
     )
     $suite = New-Z2OValidationSuite -InstallRoot $InstallRoot -Candidates $Candidates
     try {
-        $run = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $Group -TestName $suite.Name `
+        $validationGroup = $Group
+        $tlsCandidates = @($Candidates | Where-Object Kind -eq 'tls')
+        if ($tlsCandidates.Count -gt 0 -and @($tlsCandidates | Where-Object { -not $_.Degraded }).Count -eq 0) {
+            $validationGroup = [pscustomobject]@{
+                id = $Group.id
+                displayName = $Group.displayName
+                probeDomains = @($Group.probeDomains)
+                protocols = @($Group.protocols | Where-Object { $_ -ne 'https-tls12' })
+            }
+            Write-Warning "$($Group.id): no common TLS 1.2 candidate; validating a TLS 1.3-only degraded profile."
+        }
+        $run = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $validationGroup -TestName $suite.Name `
             -ScanLevel force -Repeats 5 -RunLabel "$($Group.id)-validation"
-        $validated = @(Get-Z2OCandidatesFromRun -Run $run -Group $Group)
+        $validated = @(Get-Z2OCandidatesFromRun -Run $run -Group $validationGroup)
         $selected = @()
         foreach ($version in @($Candidates | Select-Object -ExpandProperty IpVersion -Unique)) {
             foreach ($kind in @(Get-Z2OExpectedKinds -Group $Group)) {
-                $order = @($Candidates | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } | Sort-Object Order)
+                $order = @($Candidates | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } |
+                    Sort-Object @{ Expression = { Get-Z2OProductionPenalty -Strategy $_.Strategy } }, Order)
                 $validStrategies = @($validated | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } | Select-Object -ExpandProperty Strategy)
                 $winner = $order | Where-Object { $validStrategies -contains $_.Strategy } | Select-Object -First 1
                 if (-not $winner) { throw "No stable $kind strategy for $($Group.id), IPv$version." }
@@ -297,7 +340,10 @@ function Invoke-Z2OStrategySelectionCore {
     param([Parameter(Mandatory)][string]$InstallRoot, [Parameter(Mandatory)]$Catalog)
     $selections = @()
     foreach ($group in @($Catalog.groups)) {
-        $discoverySuite = if ($group.PSObject.Properties.Name -contains 'strategySuite') { [string]$group.strategySuite } else { 'standard' }
+        # Start with upstream's short custom list. It contains the current
+        # high-value TLS/QUIC candidates and keeps first-run latency bounded.
+        # Missing coverage escalates to the exhaustive standard suite below.
+        $discoverySuite = if ($group.PSObject.Properties.Name -contains 'strategySuite') { [string]$group.strategySuite } else { 'custom' }
         $discovery = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $group -TestName $discoverySuite `
             -ScanLevel standard -Repeats 1 -RunLabel "$($group.id)-discovery"
         $candidates = @(Get-Z2OCandidatesFromRun -Run $discovery -Group $group)
@@ -315,7 +361,7 @@ function Invoke-Z2OStrategySelectionCore {
 
         if ($incomplete) {
             Write-Warning "No common discovery candidate for $($group.id); running selective force scan."
-            $forced = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $group -TestName $discoverySuite `
+            $forced = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $group -TestName 'standard' `
                 -ScanLevel force -Repeats 1 -RunLabel "$($group.id)-force"
             $candidates = @(Get-Z2OCandidatesFromRun -Run $forced -Group $group)
         }
@@ -335,6 +381,8 @@ function Invoke-Z2OStrategySelectionCore {
                 IpVersion = $item.IpVersion
                 Strategy = $item.Strategy
                 DiscoveryOrder = $item.Order
+                Degraded = [bool]$item.Degraded
+                ValidatedProtocols = @($item.ValidatedProtocols)
             }
         }
     }

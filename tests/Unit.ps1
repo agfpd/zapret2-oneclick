@@ -26,6 +26,17 @@ try {
     Assert-True ($common.Count -eq 1) 'TLS intersection must contain one strategy'
     Assert-True ($common[0].Strategy -like "*--out-range=<s1*") 'strategy quoting must be preserved'
 
+    $tls13OnlyReport = Join-Path $temp 'tls13-only.tsv'
+    @(
+        "1`talpha.test`tcurl_test_https_tls13`t4`t'--payload=tls_client_hello'",
+        "2`tbeta.test`tcurl_test_https_tls13`t4`t'--payload=tls_client_hello'"
+    ) | Set-Content -LiteralPath $tls13OnlyReport -Encoding ASCII
+    $degradedRun = [pscustomobject]@{ Records = @(Read-Z2OMachineReport -Path $tls13OnlyReport) }
+    $degraded = @(Get-Z2OCandidatesFromRun -Run $degradedRun -Group $group)
+    Assert-True ($degraded.Count -eq 1 -and $degraded[0].Degraded) 'TLS 1.3-only discovery must produce an explicit degraded candidate'
+    Assert-True ((Get-Z2OProductionPenalty -Strategy "'--lua-desync=oob:urp=midsld'") -gt
+        (Get-Z2OProductionPenalty -Strategy "'--lua-desync=fake:blob=fake_default_tls'")) 'OOB must rank behind a stable payload strategy'
+
     $quoted = ConvertTo-Z2OWordexpToken -Value "a'b"
     Assert-True ($quoted -eq "'a'`"'`"'b'") 'single quote must be wordexp-safe'
 

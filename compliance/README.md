@@ -15,6 +15,11 @@ non-portable Cygwin symlinks, and overlays only the pinned HTTP/3 curl files
 needed by blockcheck2. The checked-in lock covers 101 installed Cygwin packages
 plus the legacy service DLL and HTTP/3 curl dependency sources.
 
+Normal rebuilds compare resolved package paths and hashes with the checked-in
+lock and fail on drift. Updating Cygwin is an explicit maintenance action using
+`-UpdateLock`, followed by Windows simulation and a regenerated source
+artifact; a moving mirror can never silently change release inputs.
+
 The corresponding-source builder was exercised on Windows against the locked
 cache and produced a 441 MB archive with 95 unique entries. Release packaging
 must regenerate this sibling artifact; it remains intentionally ignored by

@@ -10,6 +10,7 @@ param(
     [string]$WinBundleRoot,
     [string]$OutputRuntimeZip,
     [string]$OutputLock,
+    [switch]$UpdateLock,
     [switch]$KeepWork
 )
 
@@ -212,7 +213,19 @@ $lock = [ordered]@{
     customSources = $customSources
 }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputLock) | Out-Null
-$lock | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputLock -Encoding UTF8
+$writeLock = $true
+if ((Test-Path -LiteralPath $OutputLock -PathType Leaf) -and -not $UpdateLock) {
+    $expected = Get-Content -LiteralPath $OutputLock -Raw | ConvertFrom-Json
+    if ($expected.status -eq 'complete') {
+        $actualComparable = [ordered]@{ setup=$lock.setup; requestedPackages=$lock.requestedPackages; packages=$lock.packages; customSources=$lock.customSources } | ConvertTo-Json -Depth 8 -Compress
+        $expectedComparable = [ordered]@{ setup=$expected.setup; requestedPackages=$expected.requestedPackages; packages=$expected.packages; customSources=$expected.customSources } | ConvertTo-Json -Depth 8 -Compress
+        if ($actualComparable -ne $expectedComparable) {
+            throw 'Cygwin package resolution differs from the checked-in lock. Review it and rerun with -UpdateLock explicitly.'
+        }
+        $writeLock = $false
+    }
+}
+if ($writeLock) { $lock | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $OutputLock -Encoding UTF8 }
 
 if (Test-Path -LiteralPath $OutputRuntimeZip) { Remove-Item -LiteralPath $OutputRuntimeZip -Force }
 New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OutputRuntimeZip) | Out-Null
