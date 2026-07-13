@@ -2,6 +2,9 @@
 
 Private Windows 10/11 x86_64 one-click wrapper around official zapret2 v1.0.2.
 
+For the shortest end-user path, open `START-HERE.txt`: extract the release and
+double-click `setup.cmd`.
+
 Current target core is YouTube + Discord, including the curated Discord
 media/STUN UDP profile. Hostlists were derived from Microsoft Edge netlogs on
 the Windows acceptance host; they remain versioned data, not launcher code.
