@@ -1,28 +1,55 @@
 # zapret2-oneclick
 
-Private Windows 10/11 x86_64 one-click wrapper around official zapret2 v1.0.2.
+Приватная сборка для Windows 10/11 x86_64, которая устанавливает официальный
+движок zapret2 v1.0.2 и автоматически подбирает способ обхода блокировок для
+**YouTube и Discord**.
 
-For the shortest end-user path, open `START-HERE.txt`: extract the release and
-double-click `setup.cmd`.
+Самая короткая инструкция находится в `START-HERE.txt`.
 
-Current target core is YouTube + Discord, including the curated Discord
-media/STUN UDP profile. Hostlists were derived from Microsoft Edge netlogs on
-the Windows acceptance host; they remain versioned data, not launcher code.
+## Установка
 
-## Install and operate
+1. Полностью распакуйте ZIP-архив в обычную папку. Не запускайте файлы прямо
+   из окна архиватора.
+2. Закройте другие VPN и программы обхода блокировок: во время подбора они
+   могут исказить результат.
+3. Нажмите правой кнопкой мыши на `setup.cmd`, выберите **«Запуск от имени
+   администратора»** и подтвердите запрос Windows.
+4. Не закрывайте открывшееся окно. Первый подбор обычно занимает несколько
+   минут; каждые 15 секунд программа сообщает, что работа продолжается.
+5. Дождитесь строки **`Installed successfully`**. После неё окно можно закрыть,
+   перезагрузка не нужна.
 
-1. Extract the release to a local directory on Windows 10/11 x86_64.
-2. Double-click `setup.cmd` and approve the UAC prompt.
-3. Leave other DPI-bypass tools and VPN clients stopped while blockcheck2
-   discovers and validates strategies. A short upstream candidate list is tried
-   first; every selected candidate must then pass five validation attempts. An
-   exhaustive standard force scan runs only for a service/protocol/IP family
-   without a common quick candidate.
-4. The launcher verifies every vendored file, installs into
-   `%ProgramData%\zapret2-oneclick`, validates the generated winws2 config with
-   `--dry-run`, and creates the auto-start `zapret2-oneclick` Windows service.
+Программа проверяет целостность всех вложенных файлов, подбирает и пять раз
+проверяет рабочие настройки, устанавливает их в
+`%ProgramData%\zapret2-oneclick` и создаёт автоматически запускаемую службу
+Windows `zapret2-oneclick`.
 
-Useful maintenance commands, run from the extracted release directory:
+## Как проверить
+
+После успешной установки:
+
+1. полностью закройте и снова откройте браузер;
+2. откройте YouTube и запустите видео;
+3. откройте Discord и войдите в приложение или веб-версию;
+4. для проверки голоса зайдите в голосовой канал Discord.
+
+Если сайт не открылся, запустите из распакованной папки повторный подбор:
+
+```bat
+setup.cmd -Rescan
+```
+
+Во время повторного подбора также должны быть выключены другие VPN и программы
+обхода. Журналы установки и подбора находятся в
+`%ProgramData%\zapret2-oneclick.logs\runtime\logs`.
+
+## Удаление
+
+Запустите `uninstall.cmd` от имени администратора. Он удалит службу и файлы
+программы. Драйвер WinDivert удаляется только тогда, когда установщик записал,
+что создал его сам и драйвер не используется другой известной программой.
+
+Полезные команды из распакованной папки:
 
 ```bat
 setup.cmd -Rescan
@@ -31,77 +58,76 @@ uninstall.cmd
 uninstall.cmd -KeepLogs
 ```
 
-Validated strategy state is retained across an upgrade unless `-Rescan` is
-given. Install transcripts live under
-`%ProgramData%\zapret2-oneclick.logs\runtime\logs`. Uninstall removes the
-service and payload. It removes the WinDivert driver only when the installer
-recorded that it created the driver and no other known consumer is running;
-pre-existing or ownership-unknown shared drivers are deliberately preserved.
+- `-Rescan` — заново подобрать настройки;
+- `-Rollback` — вернуть предыдущие рабочие настройки;
+- `-KeepLogs` — удалить программу, но сохранить журналы диагностики.
 
-## Architecture
+## SmartScreen и антивирус
 
-- `setup.cmd` is the no-prerequisite entry point and delegates to elevated
-  Windows PowerShell 5.1.
-- The PowerShell orchestrator provides transactional payload replacement,
-  hash verification, selection metadata, rollback, SCM lifecycle, and
-  uninstall.
-- A reproducibly assembled portable Cygwin 3.6.9 runtime executes the original
-  upstream `blockcheck2.sh`. A narrow patch adds a TSV machine report without
-  changing strategy generation.
-- The blockcheck copy of winws2 has no adjacent `cygwin1.dll`, so it runs inside
-  Cygwin. The service copy has the official DLL adjacent and runs standalone
-  under Windows Service Control Manager.
-- Generated production arguments are stored in `runtime\active.conf`; paths are
-  absolute, and winws2 parses the file through its upstream `@config` support.
+Для установки службы и сетевого драйвера нужны права администратора. Windows
+SmartScreen может показать предупреждение для скачанного `.cmd`-файла:
+нажмите **«Подробнее» → «Выполнить в любом случае»**, только если архив получен
+из доверенного источника и его SHA-256 совпадает с опубликованной контрольной
+суммой.
 
-## Safety boundaries
+WinDivert перехватывает сетевой трафик на уровне системы, поэтому некоторые
+антивирусы считают его подозрительным. Не отключайте защиту вслепую и не
+скачивайте «исправленные» бинарники из чужих зеркал. Если антивирус удалил файл,
+сохраните название сработавшего правила и сообщите отправителю сборки.
 
-- Run only on Windows 10/11 x86_64.
-- Administrator rights are required for WinDivert and Windows service setup.
-- WinDivert can trigger antivirus products and can conflict with kernel-mode
-  firewall/AV software.
-- ARM64 is not supported; the available driver path requires Test Signing.
-- Distribute the generated corresponding-source zip alongside every binary
-  release; `build/check-release-readiness.ps1` fails closed on an incomplete
-  package/source lock or vendor hash mismatch.
+## Что входит в сборку
 
-## Extending the service catalog
+- официальный `winws2.exe` и драйвер WinDivert из zapret2 v1.0.2;
+- Lua-стратегии zapret2;
+- списки доменов YouTube и Discord;
+- переносимая среда Cygwin 3.6.9, которая запускает оригинальный
+  `blockcheck2.sh` для автоматического подбора;
+- PowerShell-установщик с проверкой SHA-256, откатом, управлением службой и
+  удалением.
 
-The launcher is catalog-driven. Adding a normal HTTP(S)/QUIC service does not
-require rebuilding the binaries:
+Для Discord дополнительно используется заранее проверенный профиль
+голосового/STUN-трафика. Обычные веб-протоколы проверяет blockcheck2; голосовую
+связь окончательно проверяют реальным звонком.
 
-1. add `config/hostlists/<service>.txt` (one parent domain per line; subdomains
-   match automatically in winws2);
-2. append a group to `config/services.json` with a stable `id`, the hostlist
-   path, representative `probeDomains`, and any of `https-tls12`,
-   `https-tls13`, `quic`;
-3. run `setup.cmd -Rescan`; the selector discovers, validates five times, and
-   falls back to a force scan only for groups without a stable candidate;
-4. confirm the full browser flow in a Windows network trace before committing
-   the list. Avoid broad parents such as all of `googleusercontent.com` unless
-   the trace proves they are required.
+## Ограничения безопасности
 
-Non-web protocols need a separately reviewed raw WinDivert filter and curated
-Lua profile. Discord's `discord-media-stun` profile is the first such example;
-blockcheck2 cannot validate it, so acceptance includes a real voice/media call.
+- Поддерживаются только Windows 10/11 x86_64. ARM64 не поддерживается.
+- Для WinDivert и службы Windows обязательны права администратора.
+- Одновременная работа нескольких средств обхода, VPN, сетевых антивирусов или
+  межсетевых экранов может вызвать конфликт.
+- Бинарники берутся только из официального релиза zapret2 и сверяются по
+  SHA-256. Подмена файла из стороннего форка запрещена.
+- Репозиторий и готовая сборка приватные. Не публикуйте их и не создавайте
+  публичное зеркало без отдельного решения владельца.
 
-## Rebuilding vendored inputs
+## Сведения для разработчиков
 
-`build/import-upstream.sh` downloads official zapret2 v1.0.2, verifies the
-official archive and binary manifests, pins the official Windows bundle commit,
-and reapplies the machine-report patch. `Build-CygwinRuntime.ps1` must be run on
-Windows to assemble the portable runtime and source lock. Before packaging:
+`setup.cmd` запускает Windows PowerShell 5.1 с повышенными правами. Launcher
+транзакционно обновляет файлы, проверяет хэши, хранит метаданные подбора,
+создаёт конфигурацию `runtime\active.conf`, проверяет её через
+`winws2 --dry-run` и управляет службой через диспетчер служб Windows.
+
+Каталог сервисов находится в `config/services.json`, списки доменов — в
+`config/hostlists/`. Добавление веб-сервиса требует сетевой трассировки,
+репрезентативных проверочных доменов и живой проверки на сети, где сервис
+действительно блокируется. Протоколы, отличные от HTTP(S)/QUIC, требуют
+отдельного фильтра WinDivert, Lua-профиля и самостоятельной приёмки.
+
+Скрипт `build/import-upstream.sh` загружает официальный zapret2 v1.0.2,
+проверяет архив и манифесты бинарников и применяет узкий патч машинного отчёта.
+`Build-CygwinRuntime.ps1` запускается на Windows и собирает переносимую среду и
+реестр соответствующих исходников. Перед упаковкой выполняются:
 
 ```powershell
 .\build\check-release-readiness.ps1
 .\build\Build-SourceArtifact.ps1
 ```
 
-Ship the generated source zip beside the binary release. Upstream versions and
-hashes are pinned in `checksums/upstream.lock.json`; binary releases must never
-be substituted from mirrors or third-party forks.
+Рядом с бинарным ZIP должен поставляться архив соответствующих исходников.
+Версии и хэши закреплены в `checksums/upstream.lock.json`.
 
-Release acceptance must use the generated binary ZIP, never the source tree:
-copy it to a clean Windows path, extract it, and run `setup.cmd` exactly as an
-end user would. Empty runtime directories and other packaging-only differences
-are otherwise invisible to source-tree tests.
+Приёмка релиза всегда проводится из **готового бинарного ZIP**, а не из дерева
+исходников: архив распаковывают в новую папку на чистой Windows-машине и
+запускают `setup.cmd` точно так же, как конечный пользователь. Сборщик также
+сам распаковывает готовый ZIP и проверяет, что после упаковки на месте весь
+payload и заново создан служебный каталог Cygwin `/tmp`.
