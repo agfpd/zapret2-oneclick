@@ -32,8 +32,21 @@ try {
     }
 
     Test-Z2OVendorManifest -SourceRoot $sourceRoot
+    $winDivertOwnership = Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot
+    if ($winDivertOwnership -eq 'unknown') {
+        # A running installation predating the ownership marker owns the driver.
+        # Otherwise an already registered WinDivert service belongs to another product.
+        $winDivertOwnership = if (Test-Z2OScServicePresent -Name 'zapret2-oneclick') {
+            'owned'
+        } elseif (Test-Z2OScServicePresent -Name 'windivert') {
+            'preexisting'
+        } else {
+            'owned'
+        }
+    }
     Stop-Z2OConflictingProcesses
     Install-Z2OPayload -SourceRoot $sourceRoot -InstallRoot $InstallRoot
+    Set-Z2OWinDivertOwnership -InstallRoot $InstallRoot -Ownership $winDivertOwnership
     Test-Z2OVendorManifest -SourceRoot $InstallRoot
 
     if (-not $SkipSelection) {

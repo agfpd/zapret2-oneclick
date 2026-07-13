@@ -31,8 +31,9 @@ uninstall.cmd -KeepLogs
 Validated strategy state is retained across an upgrade unless `-Rescan` is
 given. Install transcripts live under
 `%ProgramData%\zapret2-oneclick.logs\runtime\logs`. Uninstall removes the
-service, payload, and WinDivert driver when no other known WinDivert consumer
-is running; otherwise it deliberately leaves the shared driver in place.
+service and payload. It removes the WinDivert driver only when the installer
+recorded that it created the driver and no other known consumer is running;
+pre-existing or ownership-unknown shared drivers are deliberately preserved.
 
 ## Architecture
 

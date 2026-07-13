@@ -61,6 +61,12 @@ try {
     Assert-True ($content -match '--filter-l7=stun,discord') 'config must contain curated Discord UDP profile'
     Assert-True ((Get-Content -LiteralPath (Join-Path $install 'runtime\previous.conf') -Raw) -match 'old-config') 'previous config must be preserved for rollback'
 
+    Assert-True ((Get-Z2OWinDivertOwnership -InstallRoot $install) -eq 'unknown') 'missing driver ownership marker must fail safe'
+    Set-Z2OWinDivertOwnership -InstallRoot $install -Ownership preexisting
+    Assert-True ((Get-Z2OWinDivertOwnership -InstallRoot $install) -eq 'preexisting') 'preexisting driver ownership must be recorded'
+    Set-Z2OWinDivertOwnership -InstallRoot $install -Ownership owned
+    Assert-True ((Get-Z2OWinDivertOwnership -InstallRoot $install) -eq 'owned') 'owned driver state must be recorded'
+
     Write-Host 'All unit tests passed.' -ForegroundColor Green
 }
 finally {

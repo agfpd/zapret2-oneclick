@@ -93,6 +93,30 @@ function Invoke-Z2OSc {
     return [pscustomobject]@{ ExitCode = $code; Output = $output }
 }
 
+function Test-Z2OScServicePresent {
+    param([Parameter(Mandatory)][string]$Name)
+    return (Invoke-Z2OSc -Arguments @('query', $Name) -AllowFailure).ExitCode -eq 0
+}
+
+function Get-Z2OWinDivertOwnership {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $path = Join-Path $InstallRoot 'runtime\windivert-ownership.txt'
+    if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { return 'unknown' }
+    $value = (Get-Content -LiteralPath $path -Raw).Trim()
+    if ($value -notin @('owned', 'preexisting')) { return 'unknown' }
+    return $value
+}
+
+function Set-Z2OWinDivertOwnership {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][ValidateSet('owned', 'preexisting')][string]$Ownership
+    )
+    $path = Join-Path $InstallRoot 'runtime\windivert-ownership.txt'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $path) -Force | Out-Null
+    Set-Content -LiteralPath $path -Value $Ownership -Encoding ASCII
+}
+
 function Wait-Z2OServiceAbsent {
     param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -160,6 +184,11 @@ function Assert-Z2OServiceRunning {
 }
 
 function Remove-Z2OWinDivertService {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    if ((Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot) -ne 'owned') {
+        Write-Warning 'WinDivert driver service was left in place because this installation did not record ownership of it.'
+        return
+    }
     $otherConsumers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -in @('winws.exe', 'winws2.exe', 'goodbyedpi.exe') }
     if ($otherConsumers) {

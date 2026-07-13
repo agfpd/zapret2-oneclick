@@ -14,7 +14,7 @@ if (-not (Test-Z2OAdministrator)) {
 
 try {
     Remove-Z2OService
-    Remove-Z2OWinDivertService
+    Remove-Z2OWinDivertService -InstallRoot $InstallRoot
 
     if (Test-Path -LiteralPath $InstallRoot) {
         if ($KeepLogs) {
