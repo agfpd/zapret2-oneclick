@@ -1,13 +1,15 @@
 [CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot),
+    [string]$Root,
     [string]$ReleaseVersion = '1.0.0',
-    [string]$OutputDirectory = (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts'),
+    [string]$OutputDirectory,
     [switch]$SkipSourceArtifact,
     [string]$SourceCache
 )
 
 $ErrorActionPreference = 'Stop'
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
+if (-not $OutputDirectory) { $OutputDirectory = Join-Path $Root 'artifacts' }
 $stageRoot = Join-Path $env:TEMP ('z2o-release-' + [Guid]::NewGuid().ToString('N'))
 $stage = Join-Path $stageRoot 'zapret2-oneclick'
 $binaryZip = Join-Path $OutputDirectory "zapret2-oneclick-v$ReleaseVersion.zip"
@@ -38,7 +40,9 @@ try {
     $lines = foreach ($artifact in $artifacts) {
         '{0} *{1}' -f (Get-FileHash -LiteralPath $artifact -Algorithm SHA256).Hash.ToLowerInvariant(), [IO.Path]::GetFileName($artifact)
     }
-    $lines | Set-Content -LiteralPath $checksums -Encoding ASCII
+    # Use LF explicitly so the conventional checksum file works with both
+    # Windows tooling and sha256sum/shasum on Unix hosts.
+    [IO.File]::WriteAllText($checksums, (($lines -join "`n") + "`n"), [Text.Encoding]::ASCII)
     Write-Host "Release artifact: $binaryZip" -ForegroundColor Green
     if (-not $SkipSourceArtifact) { Write-Host "Source artifact:  $sourceZip" -ForegroundColor Green }
     Write-Host "Checksums:       $checksums" -ForegroundColor Green

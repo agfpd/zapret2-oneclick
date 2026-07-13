@@ -1,12 +1,14 @@
 [CmdletBinding()]
 param(
-    [string]$Root = (Split-Path -Parent $PSScriptRoot),
-    [string]$Output = (Join-Path (Split-Path -Parent $PSScriptRoot) 'artifacts\zapret2-oneclick-sources.zip'),
+    [string]$Root,
+    [string]$Output,
     [string]$SourceCache
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
+if (-not $Root) { $Root = Split-Path -Parent $PSScriptRoot }
+if (-not $Output) { $Output = Join-Path $Root 'artifacts\zapret2-oneclick-sources.zip' }
 $lockPath = Join-Path $Root 'compliance\cygwin-packages.lock.json'
 $lock = Get-Content -LiteralPath $lockPath -Raw | ConvertFrom-Json
 if ($lock.status -ne 'complete' -or $lock.packages.Count -eq 0) { throw 'Cygwin source lock is incomplete.' }
