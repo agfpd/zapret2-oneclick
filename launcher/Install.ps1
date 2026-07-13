@@ -45,6 +45,13 @@ try {
         }
     }
     Stop-Z2OConflictingProcesses
+    if ($winDivertOwnership -eq 'owned' -and (Test-Path -LiteralPath $InstallRoot)) {
+        # A failed/retired selection can leave our kernel driver loaded and its
+        # payload .sys locked. Stop our owned driver before atomically replacing
+        # the payload; never touch a driver recorded as preexisting.
+        Set-Z2OWinDivertOwnership -InstallRoot $InstallRoot -Ownership owned
+        Remove-Z2OWinDivertService -InstallRoot $InstallRoot
+    }
     Install-Z2OPayload -SourceRoot $sourceRoot -InstallRoot $InstallRoot
     Set-Z2OWinDivertOwnership -InstallRoot $InstallRoot -Ownership $winDivertOwnership
     Test-Z2OVendorManifest -SourceRoot $InstallRoot

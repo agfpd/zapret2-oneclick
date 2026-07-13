@@ -19,7 +19,10 @@ check_list()
 			""|\#*) continue ;;
 		esac
 		line=$(echo "$line" | tr -d "\r\n")
-		eval pktws_curl_test_update "$1" "$2" $line && ok=1
+		if eval pktws_curl_test_update "$1" "$2" $line; then
+			ok=1
+			[ "$SCANLEVEL" = quick ] && break
+		fi
 	done < "$3"
 
 	[ "$ok" = 1 ]

@@ -64,6 +64,7 @@ if [[ ! -d "$ROOT/vendor/cygwin" ]]; then
 fi
 
 patch -d "$ROOT/vendor/zapret2" -p1 <"$ROOT/patches/blockcheck2-machine-report.patch"
+patch -d "$ROOT/vendor/zapret2" -p1 <"$ROOT/patches/blockcheck2-custom-candidates.patch"
 "$ROOT/build/verify-official-binaries.sh"
 "$ROOT/build/update-manifest.sh"
 

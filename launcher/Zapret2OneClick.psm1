@@ -199,6 +199,7 @@ function Remove-Z2OWinDivertService {
     if ($query.ExitCode -eq 0) {
         Invoke-Z2OSc -Arguments @('stop', 'windivert') -AllowFailure | Out-Null
         Invoke-Z2OSc -Arguments @('delete', 'windivert') -AllowFailure | Out-Null
+        Wait-Z2OServiceAbsent -Name 'windivert'
     }
 }
 
@@ -215,7 +216,9 @@ function Stop-Z2OConflictingProcesses {
 
 function Install-Z2OPayload {
     param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$InstallRoot)
-    $staging = "$InstallRoot.staging.$([Guid]::NewGuid().ToString('N'))"
+    # Keep staging as a sibling. If replacement fails, it must never be moved
+    # inside the existing payload and mistaken for a successful install.
+    $staging = $InstallRoot + '.staging.' + [Guid]::NewGuid().ToString('N')
     try {
         New-Item -ItemType Directory -Path $staging -Force | Out-Null
         foreach ($name in @('vendor', 'config', 'launcher', 'checksums', 'patches', 'THIRD_PARTY_NOTICES.md')) {
@@ -230,9 +233,12 @@ function Install-Z2OPayload {
                 Get-ChildItem -LiteralPath $runtimeSource -Force |
                     ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $runtimeDestination -Recurse -Force }
             }
-            Remove-Item -LiteralPath $InstallRoot -Recurse -Force
+            Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction Stop
+            if (Test-Path -LiteralPath $InstallRoot) {
+                throw "Could not replace the existing payload at $InstallRoot."
+            }
         }
-        Move-Item -LiteralPath $staging -Destination $InstallRoot
+        Move-Item -LiteralPath $staging -Destination $InstallRoot -ErrorAction Stop
     }
     finally {
         if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
@@ -249,8 +255,23 @@ function Test-Z2OWinwsConfig {
     try {
         @('--dry-run') + (Get-Content -LiteralPath $ConfigPath) |
             Set-Content -LiteralPath $dryConfig -Encoding ASCII
-        $process = Start-Process -FilePath $winws -ArgumentList ('@"{0}"' -f $dryConfig) -Wait -PassThru -NoNewWindow
-        if ($process.ExitCode -ne 0) { throw "winws2 dry-run rejected $ConfigPath (exit $($process.ExitCode))." }
+        $attempt = 0
+        while ($true) {
+            $attempt++
+            $process = Start-Process -FilePath $winws -ArgumentList ('@"{0}"' -f $dryConfig) -Wait -PassThru -NoNewWindow
+            if ($process.ExitCode -eq 0) { break }
+            # A Cygwin child_copy failure can briefly leave Windows unable to
+            # initialize another native process (STATUS_DLL_INIT_FAILED). The
+            # same verified config succeeds once those handles are released.
+            # Retry only that exact transient; every config/parser failure is
+            # still reported immediately.
+            if ($process.ExitCode -eq -1073741502 -and $attempt -lt 3) {
+                Write-Warning "winws2 process initialization was temporarily unavailable; retrying dry-run ($attempt/3)."
+                Start-Sleep -Seconds 2
+                continue
+            }
+            throw "winws2 dry-run rejected $ConfigPath (exit $($process.ExitCode))."
+        }
     }
     finally {
         Remove-Item -LiteralPath $dryConfig -Force -ErrorAction SilentlyContinue
