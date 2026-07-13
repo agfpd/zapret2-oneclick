@@ -446,6 +446,26 @@ function Copy-Z2ORuntimeState {
         ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $runtimeDestination -Recurse -Force }
 }
 
+function Get-Z2OPreflightConfigLines {
+    param([Parameter(Mandatory)][string]$ConfigPath)
+    $changedTcp = $false
+    $changedUdp = $false
+    $lines = foreach ($line in Get-Content -LiteralPath $ConfigPath) {
+        if ($line -match "^'?--wf-tcp-(?:in|out)=") {
+            $changedTcp = $true
+            "'--wf-tcp-out=65535'"
+        }
+        elseif ($line -match "^'?--wf-udp-(?:in|out)=") {
+            $changedUdp = $true
+            "'--wf-udp-out=65535'"
+        }
+        else { $line }
+    }
+    if (-not $changedTcp) { $lines = @("'--wf-tcp-out=65535'") + @($lines) }
+    if (-not $changedUdp) { $lines = @("'--wf-udp-out=65535'") + @($lines) }
+    return @($lines)
+}
+
 function Test-Z2ONewPayloadPreflight {
     param(
         [Parameter(Mandatory)][string]$StagedRoot,
@@ -462,7 +482,13 @@ function Test-Z2ONewPayloadPreflight {
     $preflightConfig = Join-Path $StagedRoot 'runtime\preflight-active.conf'
     $existingConfig = Join-Path $InstallRoot 'runtime\active.conf'
     if (Test-Path -LiteralPath $existingConfig -PathType Leaf) {
-        Copy-Item -LiteralPath $existingConfig -Destination $preflightConfig -Force
+        # winws2 rejects a second dry-run instance when its WinDivert capture
+        # filter is byte-for-byte equal to the running service. Keep every
+        # production option, including raw filter parts, but move only the
+        # temporary capture ports to an unused value. This validates the new
+        # binary and the existing config before any working process is stopped.
+        Get-Z2OPreflightConfigLines -ConfigPath $existingConfig |
+            Set-Content -LiteralPath $preflightConfig -Encoding ASCII
     }
     else {
         @('--wf-l3=ipv4', '--wf-tcp-out=443') | Set-Content -LiteralPath $preflightConfig -Encoding ASCII

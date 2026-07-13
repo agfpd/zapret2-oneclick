@@ -74,6 +74,17 @@ try {
     Assert-True (Test-Z2OCygwinFailureLog -Path $cygwinLog) `
         'Cygwin child_copy error 299 must invalidate an attempt'
 
+    $preflightInput = Join-Path $temp 'preflight-input.conf'
+    @("'--wf-tcp-out=443'", "'--wf-udp-out=443'", "'--wf-raw-part=@filter.txt'", "'--filter-l7=tls'") |
+        Set-Content -LiteralPath $preflightInput -Encoding ASCII
+    $preflightLines = @(Get-Z2OPreflightConfigLines -ConfigPath $preflightInput)
+    Assert-True ($preflightLines -contains "'--wf-tcp-out=65535'") `
+        'preflight must avoid the live TCP capture filter'
+    Assert-True ($preflightLines -contains "'--wf-udp-out=65535'") `
+        'preflight must avoid the live UDP capture filter'
+    Assert-True ($preflightLines -contains "'--wf-raw-part=@filter.txt'") `
+        'preflight must still validate raw filter parts'
+
     $quoted = ConvertTo-Z2OWordexpToken -Value "a'b"
     Assert-True ($quoted -eq "'a'`"'`"'b'") 'single quote must be wordexp-safe'
 
