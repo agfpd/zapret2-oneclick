@@ -1,0 +1,29 @@
+--- a/blockcheck2.sh
++++ b/blockcheck2.sh
+@@ -1083,10 +1083,27 @@
+ 	[ "$code" = 0 ] && {
+ 		strategy="$@"
+ 		strategy_append_extra_pktws
++		machine_report_append "$dom" "$testf" "$IPV" "$@"
+ 		report_append "$dom" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy"
+ 	}
+ 	return $code
+ }
++
++machine_report_append()
++{
++	# Opt-in stable output for wrappers. Strategy arguments never contain tabs/newlines.
++	# $1 domain, $2 test function, $3 IP version, $4... strategy argv
++	[ -n "$MACHINE_REPORT" ] || return 0
++	MACHINE_SEQ=$((${MACHINE_SEQ:-0} + 1))
++	printf '%s\t%s\t%s\t%s\t' "$MACHINE_SEQ" "$1" "$2" "$3" >>"$MACHINE_REPORT"
++	shift 3
++	while [ "$#" -gt 0 ]; do
++		# POSIX-shell-safe form. Also accepted by winws2 config file wordexp().
++		printf "'%s' " "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" >>"$MACHINE_REPORT"
++		shift
++	done
++	printf '\n' >>"$MACHINE_REPORT"
++}
+ strategy_append_extra_pktws()
+ {

@@ -1,0 +1,17 @@
+* text=auto
+
+*.sh text eol=lf
+*.ps1 text eol=lf
+*.psm1 text eol=lf
+*.cmd text eol=crlf
+*.json text eol=lf
+*.md text eol=lf
+*.txt text eol=lf
+
+# Vendored bytes are covered by checksums/vendor.sha256. Never let Git alter
+# scripts, Cygwin magic files, PE binaries, or driver payloads on checkout.
+vendor/** -text
+*.exe -text
+*.dll -text
+*.sys -text
+*.zip -text

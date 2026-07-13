@@ -1,0 +1,15 @@
+{
+  "zapret2": {
+    "repository": "https://github.com/bol-van/zapret2",
+    "tag": "v1.0.2",
+    "commit": "4df94497869e18ed4fdf1272141427b2fbfc6604",
+    "archive": "zapret2-v1.0.2.zip",
+    "archiveSha256": "45f90e1c70db104a735cd0f99e5644cea84689bf05dadb498953f334999b1ebb",
+    "officialBinaryManifestSha256": "4e2bcd47fa7d90adfe740679f82d6378c957b7f14f24657cdbe3285b8e840e69"
+  },
+  "zapretWinBundle": {
+    "repository": "https://github.com/bol-van/zapret-win-bundle",
+    "commit": "0e9e3fbfb04a1681f3f8b5eb644dee4ecedcccf0"
+  }
+}
+

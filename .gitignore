@@ -1,0 +1,9 @@
+runtime/
+artifacts/
+*.log
+*.tmp
+.DS_Store
+.claude/
+.codex/
+.iapeer/
+.mcp.json

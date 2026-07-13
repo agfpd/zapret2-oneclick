@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "scopeStatus": "final",
+  "groups": [
+    {
+      "id": "youtube",
+      "displayName": "YouTube",
+      "hostlist": "hostlists/youtube.txt",
+      "probeDomains": [
+        "www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "youtube.com"
+      ],
+      "protocols": ["https-tls12", "https-tls13", "quic"]
+    },
+    {
+      "id": "discord-web",
+      "displayName": "Discord web",
+      "hostlist": "hostlists/discord.txt",
+      "probeDomains": ["discord.com/app"],
+      "protocols": ["https-tls12", "https-tls13"],
+      "curatedUdpProfile": "discord-media-stun"
+    }
+  ]
+}

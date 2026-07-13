@@ -1,0 +1,8 @@
+# YouTube core, confirmed by Microsoft Edge netlog on Windows 13.07.2026.
+youtube.com
+youtu.be
+youtube-nocookie.com
+googlevideo.com
+ytimg.com
+yt3.ggpht.com
+

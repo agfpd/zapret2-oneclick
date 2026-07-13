@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "scopeStatus": "example-only",
+  "groups": [
+    {
+      "id": "youtube",
+      "hostlist": "hostlists/youtube.txt",
+      "probeDomains": ["www.youtube.com", "youtube.com"],
+      "protocols": ["https-tls12", "https-tls13", "quic"]
+    },
+    {
+      "id": "discord-web",
+      "hostlist": "hostlists/discord.txt",
+      "probeDomains": ["discord.com"],
+      "protocols": ["https-tls12", "https-tls13"]
+    }
+  ]
+}
+

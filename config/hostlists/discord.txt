@@ -1,0 +1,11 @@
+# Discord web/CDN, confirmed by Microsoft Edge netlog on Windows 13.07.2026.
+discord.com
+discord.gg
+discordapp.com
+discordapp.net
+discord.media
+discordsays.com
+discordvibeapps.com
+discord.tools
+^discord-attachments-uploads-prd.storage.googleapis.com
+
