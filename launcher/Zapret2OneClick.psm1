@@ -132,6 +132,12 @@ function Enter-Z2OInstallerLock {
             $holder = $null
             try { $holder = Get-Content -LiteralPath $ownerPath -Raw -ErrorAction Stop | ConvertFrom-Json }
             catch { }
+            if (-not $holder) {
+                $lockAge = (Get-Date) - (Get-Item -LiteralPath $lockRoot -ErrorAction Stop).LastWriteTime
+                if ($lockAge.TotalSeconds -lt 30) {
+                    throw 'Another installer owns the machine-wide lock, but its identity is not available yet. Try again in 30 seconds.'
+                }
+            }
             $holderIsLive = $holder -and
                 (Test-Z2OProcessIdentity -ProcessId ([int]$holder.processId) -StartTimeUtcTicks ([long]$holder.startTimeUtcTicks))
             if ($holderIsLive) {
@@ -572,6 +578,10 @@ function Restore-Z2OStaleUpgradeIfNeeded {
         try {
             Assert-Z2OServiceRunning
             Remove-Item -LiteralPath ([string]$state.backupRoot) -Recurse -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath ([string]$state.backupRoot)) {
+                Write-Warning 'The completed update backup is still locked; keeping its recovery journal for the next run.'
+                return
+            }
             Remove-Item -LiteralPath $statePath -Force -ErrorAction Stop
             return
         }
