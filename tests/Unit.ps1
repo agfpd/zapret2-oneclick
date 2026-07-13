@@ -109,8 +109,11 @@ try {
 
     $payloadSource = Join-Path $temp 'payload-source'
     $payloadInstall = Join-Path $temp 'payload-install'
-    New-Item -ItemType Directory -Path (Join-Path $payloadSource 'config'),(Join-Path $payloadInstall 'runtime') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $payloadSource 'config'),(Join-Path $payloadSource 'checksums'),(Join-Path $payloadInstall 'runtime') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $payloadSource 'config\new.txt') -Value 'new' -Encoding ASCII
+    $payloadHash = Get-Z2OSha256 -Path (Join-Path $payloadSource 'config\new.txt')
+    Set-Content -LiteralPath (Join-Path $payloadSource 'checksums\vendor.sha256') `
+        -Value ("{0}  config/new.txt" -f $payloadHash) -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $payloadInstall 'runtime\keep.txt') -Value 'keep' -Encoding ASCII
     Install-Z2OPayload -SourceRoot $payloadSource -InstallRoot $payloadInstall
     Assert-True (Test-Path -LiteralPath (Join-Path $payloadInstall 'config\new.txt')) `
@@ -119,6 +122,24 @@ try {
         'payload replacement must preserve runtime state'
     Assert-True (@(Get-ChildItem -LiteralPath $temp -Directory -Filter 'payload-install.staging.*').Count -eq 0) `
         'payload staging must remain a cleaned sibling, never a nested install'
+
+    $transactionInstall = Join-Path $temp 'transaction-install'
+    $transactionStage = Join-Path $temp 'transaction-stage'
+    New-Item -ItemType Directory -Path (Join-Path $transactionInstall 'runtime'),(Join-Path $transactionStage 'runtime') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $transactionInstall 'old.txt') -Value old -Encoding ASCII
+    Set-Content -LiteralPath (Join-Path $transactionStage 'new.txt') -Value new -Encoding ASCII
+    $snapshot = [pscustomobject]@{ WasPresent = $false; WasRunning = $false; HadWorkingConfig = $false }
+    $transaction = New-Z2OUpgradeTransaction -InstallRoot $transactionInstall -StagedRoot $transactionStage `
+        -ServiceSnapshot $snapshot
+    Assert-True (Test-Path -LiteralPath (Join-Path $transactionInstall 'new.txt')) `
+        'transaction must publish the staged payload'
+    Assert-True (Test-Path -LiteralPath ([string]$transaction.State.backupRoot)) `
+        'transaction must retain the old payload until commit'
+    Restore-Z2OUpgradeTransaction -Transaction $transaction
+    Assert-True (Test-Path -LiteralPath (Join-Path $transactionInstall 'old.txt')) `
+        'transaction rollback must restore the old payload'
+    Assert-True (-not (Test-Path -LiteralPath $transaction.StatePath)) `
+        'transaction rollback must remove its durable journal'
 
     Write-Host 'All unit tests passed.' -ForegroundColor Green
 }

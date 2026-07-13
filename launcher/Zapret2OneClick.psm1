@@ -83,6 +83,121 @@ function Test-Z2OVendorManifest {
     if ($failures.Count -gt 0) { throw ($failures -join [Environment]::NewLine) }
 }
 
+function Get-Z2OInstallerLockPath {
+    return (Join-Path $env:ProgramData 'zapret2-oneclick.install-lock')
+}
+
+function Get-Z2OUpgradeStatePath {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    return ($InstallRoot + '.upgrade-state.json')
+}
+
+function Write-Z2OJsonAtomic {
+    param([Parameter(Mandatory)]$Value, [Parameter(Mandatory)][string]$Path)
+    $temporary = $Path + '.tmp.' + [Guid]::NewGuid().ToString('N')
+    try {
+        $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Move-Item -LiteralPath $temporary -Destination $Path -Force
+    }
+    finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Test-Z2OProcessIdentity {
+    param([Parameter(Mandatory)][int]$ProcessId, [Parameter(Mandatory)][long]$StartTimeUtcTicks)
+    $process = Get-Process -Id $ProcessId -ErrorAction SilentlyContinue
+    if (-not $process) { return $false }
+    try { return $process.StartTime.ToUniversalTime().Ticks -eq $StartTimeUtcTicks }
+    catch { return $false }
+}
+
+function Enter-Z2OInstallerLock {
+    param([Parameter(Mandatory)][string]$InstallRoot, [int]$WaitSeconds = 3)
+    $lockRoot = Get-Z2OInstallerLockPath
+    $ownerPath = Join-Path $lockRoot 'owner.json'
+    $acquired = $false
+    try {
+        $deadline = (Get-Date).AddSeconds($WaitSeconds)
+        do {
+            try {
+                New-Item -ItemType Directory -Path $lockRoot -ErrorAction Stop | Out-Null
+                $acquired = $true
+                break
+            }
+            catch { Start-Sleep -Milliseconds 200 }
+        } while ((Get-Date) -lt $deadline)
+
+        if (-not $acquired) {
+            $holder = $null
+            try { $holder = Get-Content -LiteralPath $ownerPath -Raw -ErrorAction Stop | ConvertFrom-Json }
+            catch { }
+            $holderIsLive = $holder -and
+                (Test-Z2OProcessIdentity -ProcessId ([int]$holder.processId) -StartTimeUtcTicks ([long]$holder.startTimeUtcTicks))
+            if ($holderIsLive) {
+                $holderProcess = Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f [int]$holder.processId) -ErrorAction SilentlyContinue
+                if (-not $holderProcess -or $holderProcess.CommandLine -notmatch '(?i)[\\/]launcher[\\/]Install\.ps1(?:\s|\"|$)') {
+                    throw 'The installer lock holder is not a verified zapret2-oneclick installer; refusing to terminate it.'
+                }
+                Write-Warning ("Taking over an older installer process (PID {0}, phase {1})." -f $holder.processId, $holder.phase)
+                & "$env:SystemRoot\System32\taskkill.exe" /PID ([int]$holder.processId) /T /F 2>&1 | Out-Null
+            }
+            else {
+                Write-Warning 'Removing a stale installer lock whose owner is no longer running.'
+            }
+            Remove-Item -LiteralPath $lockRoot -Recurse -Force -ErrorAction Stop
+            $deadline = (Get-Date).AddSeconds(15)
+            do {
+                try {
+                    New-Item -ItemType Directory -Path $lockRoot -ErrorAction Stop | Out-Null
+                    $acquired = $true
+                    break
+                }
+                catch { Start-Sleep -Milliseconds 200 }
+            } while ((Get-Date) -lt $deadline)
+            if (-not $acquired) { throw 'The previous installer did not release the machine-wide lock.' }
+        }
+
+        $process = Get-Process -Id $PID
+        $owner = [ordered]@{
+            schemaVersion = 1
+            processId = $PID
+            startTimeUtcTicks = $process.StartTime.ToUniversalTime().Ticks
+            installRoot = [IO.Path]::GetFullPath($InstallRoot)
+            phase = 'preflight-complete'
+            updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+        }
+        Write-Z2OJsonAtomic -Value $owner -Path $ownerPath
+        return [pscustomobject]@{ Path = $lockRoot; OwnerPath = $ownerPath; Owner = $owner }
+    }
+    catch {
+        if ($acquired) { Remove-Item -LiteralPath $lockRoot -Recurse -Force -ErrorAction SilentlyContinue }
+        throw
+    }
+}
+
+function Set-Z2OInstallerLockPhase {
+    param([Parameter(Mandatory)]$Lock, [Parameter(Mandatory)][string]$Phase)
+    $Lock.Owner.phase = $Phase
+    $Lock.Owner.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Write-Z2OJsonAtomic -Value $Lock.Owner -Path $Lock.OwnerPath
+}
+
+function Exit-Z2OInstallerLock {
+    param($Lock)
+    if (-not $Lock) { return }
+    try {
+        $owner = $null
+        try { $owner = Get-Content -LiteralPath $Lock.OwnerPath -Raw -ErrorAction Stop | ConvertFrom-Json }
+        catch { }
+        if ($owner -and [int]$owner.processId -eq $PID -and
+            [long]$owner.startTimeUtcTicks -eq [long]$Lock.Owner.startTimeUtcTicks) {
+            Remove-Item -LiteralPath $Lock.Path -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+    finally { }
+}
+
 function Invoke-Z2OSc {
     param([Parameter(Mandatory)][string[]]$Arguments, [switch]$AllowFailure)
     $output = & "$env:SystemRoot\System32\sc.exe" @Arguments 2>&1
@@ -203,45 +318,283 @@ function Remove-Z2OWinDivertService {
     }
 }
 
-function Stop-Z2OConflictingProcesses {
-    param([string]$ServiceName = $script:Z2OServiceName)
-    Remove-Z2OService -Name $ServiceName
-    $conflicts = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -in @('winws.exe', 'winws2.exe', 'goodbyedpi.exe') }
-    if ($conflicts) {
-        $details = $conflicts | ForEach-Object { '{0} (PID {1})' -f $_.Name, $_.ProcessId }
+function Test-Z2OPathUnderRoot {
+    param([string]$Path, [Parameter(Mandatory)][string]$Root)
+    if ([string]::IsNullOrWhiteSpace($Path)) { return $false }
+    $rootPrefix = ([IO.Path]::GetFullPath($Root)).TrimEnd('\') + '\'
+    try { return ([IO.Path]::GetFullPath($Path)).StartsWith($rootPrefix, [StringComparison]::OrdinalIgnoreCase) }
+    catch { return $false }
+}
+
+function Get-Z2OInstallProcesses {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        Test-Z2OPathUnderRoot -Path $_.ExecutablePath -Root $InstallRoot
+    })
+}
+
+function Get-Z2OForeignConflictingProcesses {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    return @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+        $_.Name -in @('winws.exe', 'winws2.exe', 'goodbyedpi.exe') -and
+        -not (Test-Z2OPathUnderRoot -Path $_.ExecutablePath -Root $InstallRoot)
+    })
+}
+
+function Assert-Z2ONoForeignConflicts {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $conflicts = @(Get-Z2OForeignConflictingProcesses -InstallRoot $InstallRoot)
+    if ($conflicts.Count -gt 0) {
+        $details = $conflicts | ForEach-Object { '{0} (PID {1}, {2})' -f $_.Name, $_.ProcessId, $_.ExecutablePath }
         throw "Stop other DPI bypass processes before installation: $($details -join ', ')"
     }
 }
 
-function Install-Z2OPayload {
+function Stop-Z2OExistingInstallerProcesses {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $all = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)
+    $byId = @{}
+    foreach ($process in $all) { $byId[[int]$process.ProcessId] = $process }
+    $private = @($all | Where-Object { Test-Z2OPathUnderRoot -Path $_.ExecutablePath -Root $InstallRoot })
+    $parents = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($process in $private) {
+        $cursor = $process
+        for ($depth = 0; $depth -lt 12; $depth++) {
+            $parentId = [int]$cursor.ParentProcessId
+            if ($parentId -le 0 -or -not $byId.ContainsKey($parentId)) { break }
+            $cursor = $byId[$parentId]
+            if ([int]$cursor.ProcessId -eq $PID) { break }
+            if ($cursor.Name -match '^(powershell|pwsh)\.exe$' -and
+                $cursor.CommandLine -match '(?i)[\\/]launcher[\\/]Install\.ps1(?:\s|\"|$)') {
+                [void]$parents.Add([int]$cursor.ProcessId)
+                break
+            }
+        }
+    }
+    foreach ($parentId in $parents) {
+        Write-Warning "Stopping an older installer process tree (PID $parentId)."
+        & "$env:SystemRoot\System32\taskkill.exe" /PID $parentId /T /F 2>&1 | Out-Null
+    }
+}
+
+function Stop-Z2OInstallProcesses {
+    param([Parameter(Mandatory)][string]$InstallRoot, [int]$TimeoutSeconds = 15)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        $processes = @(Get-Z2OInstallProcesses -InstallRoot $InstallRoot)
+        if ($processes.Count -eq 0) { return }
+        foreach ($process in $processes) {
+            & "$env:SystemRoot\System32\taskkill.exe" /PID ([int]$process.ProcessId) /T /F 2>&1 | Out-Null
+        }
+        Start-Sleep -Milliseconds 250
+    } while ((Get-Date) -lt $deadline)
+    $remaining = @(Get-Z2OInstallProcesses -InstallRoot $InstallRoot)
+    if ($remaining.Count -gt 0) {
+        $details = $remaining | ForEach-Object { '{0} (PID {1})' -f $_.Name, $_.ProcessId }
+        throw "Could not stop existing private processes: $($details -join ', ')"
+    }
+}
+
+function Stop-Z2OConflictingProcesses {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [string]$ServiceName = $script:Z2OServiceName
+    )
+    Stop-Z2OExistingInstallerProcesses -InstallRoot $InstallRoot
+    Remove-Z2OService -Name $ServiceName
+    Stop-Z2OInstallProcesses -InstallRoot $InstallRoot
+    Assert-Z2ONoForeignConflicts -InstallRoot $InstallRoot
+}
+
+function Copy-Z2OPayloadTree {
+    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$DestinationRoot)
+    New-Item -ItemType Directory -Path $DestinationRoot -Force | Out-Null
+    foreach ($name in @('vendor', 'config', 'launcher', 'checksums', 'patches', 'THIRD_PARTY_NOTICES.md')) {
+        $source = Join-Path $SourceRoot $name
+        if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $DestinationRoot -Recurse -Force }
+    }
+    New-Item -ItemType Directory -Path (Join-Path $DestinationRoot 'runtime\logs') -Force | Out-Null
+}
+
+function New-Z2OPayloadStage {
     param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$InstallRoot)
-    # Keep staging as a sibling. If replacement fails, it must never be moved
-    # inside the existing payload and mistaken for a successful install.
     $staging = $InstallRoot + '.staging.' + [Guid]::NewGuid().ToString('N')
     try {
-        New-Item -ItemType Directory -Path $staging -Force | Out-Null
-        foreach ($name in @('vendor', 'config', 'launcher', 'checksums', 'patches', 'THIRD_PARTY_NOTICES.md')) {
-            $source = Join-Path $SourceRoot $name
-            if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $staging -Recurse -Force }
-        }
-        New-Item -ItemType Directory -Path (Join-Path $staging 'runtime\logs') -Force | Out-Null
+        Copy-Z2OPayloadTree -SourceRoot $SourceRoot -DestinationRoot $staging
+        Test-Z2OVendorManifest -SourceRoot $staging
+        return $staging
+    }
+    catch {
+        Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Copy-Z2ORuntimeState {
+    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$DestinationRoot)
+    $runtimeSource = Join-Path $SourceRoot 'runtime'
+    if (-not (Test-Path -LiteralPath $runtimeSource -PathType Container)) { return }
+    $runtimeDestination = Join-Path $DestinationRoot 'runtime'
+    New-Item -ItemType Directory -Path $runtimeDestination -Force | Out-Null
+    Get-ChildItem -LiteralPath $runtimeSource -Force |
+        ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $runtimeDestination -Recurse -Force }
+}
+
+function Test-Z2ONewPayloadPreflight {
+    param(
+        [Parameter(Mandatory)][string]$StagedRoot,
+        [Parameter(Mandatory)][string]$InstallRoot
+    )
+    Test-Z2OVendorManifest -SourceRoot $StagedRoot
+    $servicesPath = Join-Path $StagedRoot 'config\services.json'
+    $catalog = Get-Content -LiteralPath $servicesPath -Raw | ConvertFrom-Json
+    if ($catalog.scopeStatus -ne 'final' -or $catalog.groups.Count -eq 0) {
+        throw 'The new payload has no finalized service catalog.'
+    }
+    Assert-Z2ONoForeignConflicts -InstallRoot $InstallRoot
+
+    $preflightConfig = Join-Path $StagedRoot 'runtime\preflight-active.conf'
+    $existingConfig = Join-Path $InstallRoot 'runtime\active.conf'
+    if (Test-Path -LiteralPath $existingConfig -PathType Leaf) {
+        Copy-Item -LiteralPath $existingConfig -Destination $preflightConfig -Force
+    }
+    else {
+        @('--wf-l3=ipv4', '--wf-tcp-out=443') | Set-Content -LiteralPath $preflightConfig -Encoding ASCII
+    }
+    try { Test-Z2OWinwsConfig -InstallRoot $StagedRoot -ConfigPath $preflightConfig }
+    finally { Remove-Item -LiteralPath $preflightConfig -Force -ErrorAction SilentlyContinue }
+}
+
+function Get-Z2OServiceSnapshot {
+    param([string]$Name = $script:Z2OServiceName, [Parameter(Mandatory)][string]$InstallRoot)
+    $service = Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $Name) -ErrorAction SilentlyContinue
+    return [pscustomobject]@{
+        WasPresent = $null -ne $service
+        WasRunning = $null -ne $service -and $service.State -eq 'Running'
+        HadWorkingConfig = (Test-Path -LiteralPath (Join-Path $InstallRoot 'runtime\active.conf') -PathType Leaf)
+    }
+}
+
+function New-Z2OUpgradeTransaction {
+    param(
+        [Parameter(Mandatory)][string]$InstallRoot,
+        [Parameter(Mandatory)][string]$StagedRoot,
+        [Parameter(Mandatory)]$ServiceSnapshot
+    )
+    $backupRoot = $InstallRoot + '.rollback.' + [Guid]::NewGuid().ToString('N')
+    $statePath = Get-Z2OUpgradeStatePath -InstallRoot $InstallRoot
+    $state = [ordered]@{
+        schemaVersion = 1
+        installRoot = [IO.Path]::GetFullPath($InstallRoot)
+        stagedRoot = [IO.Path]::GetFullPath($StagedRoot)
+        backupRoot = [IO.Path]::GetFullPath($backupRoot)
+        wasServicePresent = [bool]$ServiceSnapshot.WasPresent
+        wasServiceRunning = [bool]$ServiceSnapshot.WasRunning
+        hadWorkingConfig = [bool]$ServiceSnapshot.HadWorkingConfig
+        phase = 'prepared'
+        updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    }
+    Write-Z2OJsonAtomic -Value $state -Path $statePath
+    $transaction = [pscustomobject]@{ State = $state; StatePath = $statePath }
+    try {
         if (Test-Path -LiteralPath $InstallRoot) {
-            $runtimeSource = Join-Path $InstallRoot 'runtime'
-            if (Test-Path -LiteralPath $runtimeSource) {
-                $runtimeDestination = Join-Path $staging 'runtime'
-                Get-ChildItem -LiteralPath $runtimeSource -Force |
-                    ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $runtimeDestination -Recurse -Force }
-            }
+            Copy-Z2ORuntimeState -SourceRoot $InstallRoot -DestinationRoot $StagedRoot
+            Move-Item -LiteralPath $InstallRoot -Destination $backupRoot -ErrorAction Stop
+        }
+        $state.phase = 'old-moved'
+        $state.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+        Write-Z2OJsonAtomic -Value $state -Path $statePath
+        Move-Item -LiteralPath $StagedRoot -Destination $InstallRoot -ErrorAction Stop
+        $state.phase = 'new-published'
+        $state.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+        Write-Z2OJsonAtomic -Value $state -Path $statePath
+        return $transaction
+    }
+    catch {
+        $original = $_
+        try { Restore-Z2OUpgradeTransaction -Transaction $transaction }
+        catch { throw "Payload publication failed and rollback also failed: $original; rollback: $_" }
+        throw $original
+    }
+}
+
+function Set-Z2OUpgradePhase {
+    param([Parameter(Mandatory)]$Transaction, [Parameter(Mandatory)][string]$Phase)
+    $Transaction.State.phase = $Phase
+    $Transaction.State.updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+    Write-Z2OJsonAtomic -Value $Transaction.State -Path $Transaction.StatePath
+}
+
+function Restore-Z2OUpgradeTransaction {
+    param([Parameter(Mandatory)]$Transaction)
+    $state = $Transaction.State
+    $installRoot = [string]$state.installRoot
+    $backupRoot = [string]$state.backupRoot
+    Write-Warning 'The update failed; restoring the previous working installation.'
+    Remove-Z2OService -Name $script:Z2OServiceName
+    Stop-Z2OInstallProcesses -InstallRoot $installRoot
+    if (Test-Path -LiteralPath $backupRoot -PathType Container) {
+        if (Test-Path -LiteralPath $installRoot -PathType Container) {
+            try { Remove-Z2OWinDivertService -InstallRoot $installRoot } catch { }
+            Remove-Item -LiteralPath $installRoot -Recurse -Force -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $backupRoot -Destination $installRoot -ErrorAction Stop
+    }
+    if ([bool]$state.hadWorkingConfig -and (Test-Path -LiteralPath $installRoot -PathType Container)) {
+        $activeConfig = Join-Path $installRoot 'runtime\active.conf'
+        Test-Z2OWinwsConfig -InstallRoot $installRoot -ConfigPath $activeConfig
+        Install-Z2OService -InstallRoot $installRoot -ConfigPath $activeConfig
+        Start-Z2OService
+        Assert-Z2OServiceRunning
+    }
+    Remove-Item -LiteralPath ([string]$state.stagedRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $Transaction.StatePath -Force -ErrorAction SilentlyContinue
+}
+
+function Complete-Z2OUpgradeTransaction {
+    param([Parameter(Mandatory)]$Transaction)
+    Set-Z2OUpgradePhase -Transaction $Transaction -Phase 'service-running'
+    Remove-Item -LiteralPath ([string]$Transaction.State.backupRoot) -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath ([string]$Transaction.State.backupRoot)) {
+        Write-Warning 'The previous payload backup is still locked; it will be cleaned by the next installer run.'
+        return
+    }
+    Remove-Item -LiteralPath $Transaction.StatePath -Force -ErrorAction SilentlyContinue
+}
+
+function Restore-Z2OStaleUpgradeIfNeeded {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    $statePath = Get-Z2OUpgradeStatePath -InstallRoot $InstallRoot
+    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf)) { return }
+    $state = Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json
+    $transaction = [pscustomobject]@{ State = $state; StatePath = $statePath }
+    if ($state.phase -eq 'service-running') {
+        try {
+            Assert-Z2OServiceRunning
+            Remove-Item -LiteralPath ([string]$state.backupRoot) -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $statePath -Force -ErrorAction Stop
+            return
+        }
+        catch { }
+    }
+    Restore-Z2OUpgradeTransaction -Transaction $transaction
+}
+
+function Install-Z2OPayload {
+    param([Parameter(Mandatory)][string]$SourceRoot, [Parameter(Mandatory)][string]$InstallRoot)
+    $staging = New-Z2OPayloadStage -SourceRoot $SourceRoot -InstallRoot $InstallRoot
+    try {
+        if (Test-Path -LiteralPath $InstallRoot) {
+            Copy-Z2ORuntimeState -SourceRoot $InstallRoot -DestinationRoot $staging
             Remove-Item -LiteralPath $InstallRoot -Recurse -Force -ErrorAction Stop
-            if (Test-Path -LiteralPath $InstallRoot) {
-                throw "Could not replace the existing payload at $InstallRoot."
-            }
         }
         Move-Item -LiteralPath $staging -Destination $InstallRoot -ErrorAction Stop
+        $staging = $null
     }
     finally {
-        if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
+        if ($staging -and (Test-Path -LiteralPath $staging)) {
+            Remove-Item -LiteralPath $staging -Recurse -Force -ErrorAction SilentlyContinue
+        }
     }
 }
 
