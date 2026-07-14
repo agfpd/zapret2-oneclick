@@ -155,8 +155,16 @@ function Wait-Z2OBlockcheckProcess {
         [ValidateRange(1, 60)][int]$HeartbeatSeconds = 15
     )
     $startedAt = Get-Date
+    $softDeadline = $startedAt.AddSeconds($MaxRunSeconds)
     $lastProgressAt = $startedAt
     $lastLength = 0L
+    $lastSemanticProgressAt = $null
+    $lastSeenTests = 0
+    $lastSeenSuccesses = 0
+    $leaseLength = 0L
+    $leaseTests = 0
+    $leaseSuccesses = 0
+    $leaseRenewals = 0
     $nextHeartbeat = $HeartbeatSeconds
     while (-not $Process.WaitForExit(500)) {
         $now = Get-Date
@@ -175,19 +183,65 @@ function Wait-Z2OBlockcheckProcess {
         $Process.Refresh()
         if ($Process.HasExited) { break }
         if (Test-Z2OCygwinFailureLog -Path $StderrPath) {
-            return [pscustomobject]@{ Status = 'cygwin'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor }
-        }
-        if ($elapsed -ge $MaxRunSeconds) {
-            return [pscustomobject]@{ Status = 'limit'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor }
+            return [pscustomobject]@{
+                Status = 'cygwin'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor
+                LeaseRenewals = $leaseRenewals
+            }
         }
         if ($stalledFor -ge $StallSeconds) {
-            return [pscustomobject]@{ Status = 'stall'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor }
+            return [pscustomobject]@{
+                Status = 'stall'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor
+                LeaseRenewals = $leaseRenewals
+            }
         }
-        if ($elapsed -ge $nextHeartbeat) {
+
+        $deadlineReached = $now -ge $softDeadline
+        $heartbeatDue = $elapsed -ge $nextHeartbeat
+        if ($deadlineReached -or $heartbeatDue) {
             $progress = Get-Z2OBlockcheckProgress -Path $StdoutPath
-            Write-Host ("blockcheck2 progress: {0}, {1}s/{2}s, tests={3}, successes={4}, last output {5}s ago. Live log: {6}" -f `
-                $DisplayName, $elapsed, $MaxRunSeconds, $progress.Tests, $progress.Successes, $stalledFor, $StdoutPath) `
-                -ForegroundColor DarkGray
+            if ($progress.Tests -gt $lastSeenTests -or $progress.Successes -gt $lastSeenSuccesses) {
+                $lastSemanticProgressAt = $now
+            }
+            $lastSeenTests = [Math]::Max($lastSeenTests, $progress.Tests)
+            $lastSeenSuccesses = [Math]::Max($lastSeenSuccesses, $progress.Successes)
+
+            if ($deadlineReached) {
+                # MaxRunSeconds is a soft lease, not a kill-at-an-arbitrary-second
+                # deadline. Renew it while blockcheck2 is still producing fresh
+                # output (structured test/success counters are an additional
+                # signal). A genuinely silent run is still terminated by the
+                # independent stall watchdog.
+                $outputSinceLease = $progress.Length -gt $leaseLength
+                $outputIsRecent = $stalledFor -lt $StallSeconds
+                $progressSinceLease = $progress.Tests -gt $leaseTests -or $progress.Successes -gt $leaseSuccesses
+                $semanticProgressIsRecent = $null -ne $lastSemanticProgressAt -and `
+                    ($now - $lastSemanticProgressAt).TotalSeconds -le $StallSeconds
+                $canRenew = ($outputSinceLease -and $outputIsRecent) -or `
+                    ($progressSinceLease -and $semanticProgressIsRecent)
+                if (-not $canRenew) {
+                    return [pscustomobject]@{
+                        Status = 'limit'; ElapsedSeconds = $elapsed; StalledSeconds = $stalledFor
+                        LeaseRenewals = $leaseRenewals
+                    }
+                }
+
+                $leaseLength = $progress.Length
+                $leaseTests = $progress.Tests
+                $leaseSuccesses = $progress.Successes
+                $leaseRenewals++
+                $softDeadline = $now.AddSeconds($StallSeconds)
+                Write-Host ("blockcheck2 passed the {0}s soft limit with fresh output; renewed for {1}s (tests={2}, successes={3}, renewals={4})." -f `
+                    $MaxRunSeconds, $StallSeconds, $progress.Tests, $progress.Successes, $leaseRenewals) `
+                    -ForegroundColor DarkGray
+            }
+
+            if ($heartbeatDue) {
+                $deadlineElapsed = [int]($softDeadline - $startedAt).TotalSeconds
+                Write-Host ("blockcheck2 progress: {0}, elapsed={1}s, soft limit={2}s, lease deadline={3}s, renewals={4}, tests={5}, successes={6}, last output {7}s ago. Live log: {8}" -f `
+                    $DisplayName, $elapsed, $MaxRunSeconds, $deadlineElapsed, $leaseRenewals, `
+                    $progress.Tests, $progress.Successes, $stalledFor, $StdoutPath) `
+                    -ForegroundColor DarkGray
+            }
             $nextHeartbeat += $HeartbeatSeconds
         }
     }
@@ -197,6 +251,7 @@ function Wait-Z2OBlockcheckProcess {
         Status = $(if (Test-Z2OCygwinFailureLog -Path $StderrPath) { 'cygwin' } else { 'completed' })
         ElapsedSeconds = [int]((Get-Date) - $startedAt).TotalSeconds
         StalledSeconds = 0
+        LeaseRenewals = $leaseRenewals
     }
 }
 
@@ -265,11 +320,11 @@ function Invoke-Z2OBlockcheckRun {
             $attempt++
             $remainingSeconds = $MaxRunSeconds - [int]((Get-Date) - $overallStartedAt).TotalSeconds
             if ($remainingSeconds -lt 2) {
-                throw "blockcheck2 exhausted the ${MaxRunSeconds}s total limit for $($Group.id). Live log: $stdoutPath"
+                throw "blockcheck2 exhausted the ${MaxRunSeconds}s retry budget for $($Group.id). Live log: $stdoutPath"
             }
             Remove-Item -LiteralPath $stdoutPath, $stderrPath, $machinePath -Force -ErrorAction SilentlyContinue
-            Write-Host ("blockcheck2: {0}, test={1}, scan={2}, repeats={3}, limit={4}s" -f `
-                $Group.displayName, $TestName, $ScanLevel, $Repeats, $MaxRunSeconds) -ForegroundColor Cyan
+            Write-Host ("blockcheck2: {0}, test={1}, scan={2}, repeats={3}, soft limit={4}s, stall limit={5}s" -f `
+                $Group.displayName, $TestName, $ScanLevel, $Repeats, $MaxRunSeconds, $StallSeconds) -ForegroundColor Cyan
             $process = $null
             $outcome = $null
             $exitCode = $null
@@ -312,9 +367,9 @@ function Invoke-Z2OBlockcheckRun {
             if ($outcome.Status -eq 'limit') {
                 $partialRecords = @(Read-Z2OMachineReport -Path $machinePath)
                 if (-not $AllowPartialAtLimit -or $partialRecords.Count -eq 0) {
-                    throw "blockcheck2 exceeded the ${MaxRunSeconds}s total limit for $($Group.id); its process tree was stopped. Live log: $stdoutPath"
+                    throw "blockcheck2 reached its ${MaxRunSeconds}s soft limit without fresh output for $($Group.id); its process tree was stopped. Live log: $stdoutPath"
                 }
-                Write-Warning ("blockcheck2 reached its {0}s limit for {1}; using {2} completed successful probes for bounded validation." -f `
+                Write-Warning ("blockcheck2 reached its {0}s soft limit without fresh output for {1}; using {2} completed successful probes for bounded validation." -f `
                     $MaxRunSeconds, $Group.id, $partialRecords.Count)
                 break
             }
@@ -612,7 +667,7 @@ function Select-Z2OStableStrategies {
             Write-Warning "$($Group.id): no common TLS 1.2 candidate; validating a TLS 1.3-only degraded profile."
         }
         $run = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $validationGroup -TestName $suite.Name `
-            -ScanLevel force -Repeats 5 -RunLabel "$($Group.id)-validation" -MaxRunSeconds 500 -StallSeconds 120
+            -ScanLevel force -Repeats 5 -RunLabel "$($Group.id)-validation" -MaxRunSeconds 900 -StallSeconds 120
         $validated = @(Get-Z2OCandidatesFromRun -Run $run -Group $validationGroup)
         return @(Select-Z2OValidatedCandidates -Candidates $Candidates -Validated $validated -Group $Group `
             -RequiredVersions $RequiredVersions)

@@ -66,6 +66,54 @@ Start-Sleep -Seconds 30
     }
     Assert-True (Wait-ProcessGone -Id $process.Id) 'Cygwin-failed attempt must be stopped'
 
+    $stdout = Join-Path $temp 'progress.log'
+    $stderr = Join-Path $temp 'progress.err.log'
+    New-Item -ItemType File -Path $stdout, $stderr -Force | Out-Null
+    $progressScript = Join-Path $temp 'progress.ps1'
+    @"
+for (`$i = 0; `$i -lt 12; `$i++) {
+    Add-Content -LiteralPath '$stdout' -Value "- curl_test_https_tls12 test `$i"
+    Start-Sleep -Milliseconds 250
+}
+"@ | Set-Content -LiteralPath $progressScript -Encoding ASCII
+    $process = Start-Process -FilePath powershell.exe `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $progressScript)) `
+        -PassThru -NoNewWindow
+    try {
+        $outcome = Wait-Z2OBlockcheckProcess -Process $process -StdoutPath $stdout -StderrPath $stderr `
+            -DisplayName 'watchdog-progress-renewal-test' -MaxRunSeconds 2 -StallSeconds 2 -HeartbeatSeconds 1
+        Assert-True ($outcome.Status -eq 'completed') 'recent semantic progress must renew the soft runtime lease'
+        Assert-True ($outcome.LeaseRenewals -ge 1) 'a run that crosses its soft limit must record a lease renewal'
+    }
+    finally {
+        Stop-Z2OProcessTree -Process $process
+    }
+    Assert-True (Wait-ProcessGone -Id $process.Id) 'a progressing process must finish normally'
+
+    $stdout = Join-Path $temp 'fresh-output.log'
+    $stderr = Join-Path $temp 'fresh-output.err.log'
+    New-Item -ItemType File -Path $stdout, $stderr -Force | Out-Null
+    $freshOutputScript = Join-Path $temp 'fresh-output.ps1'
+    @"
+for (`$i = 0; `$i -lt 12; `$i++) {
+    Add-Content -LiteralPath '$stdout' -Value "live blockcheck diagnostic `$i"
+    Start-Sleep -Milliseconds 250
+}
+"@ | Set-Content -LiteralPath $freshOutputScript -Encoding ASCII
+    $process = Start-Process -FilePath powershell.exe `
+        -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $freshOutputScript)) `
+        -PassThru -NoNewWindow
+    try {
+        $outcome = Wait-Z2OBlockcheckProcess -Process $process -StdoutPath $stdout -StderrPath $stderr `
+            -DisplayName 'watchdog-fresh-output-renewal-test' -MaxRunSeconds 2 -StallSeconds 2 -HeartbeatSeconds 1
+        Assert-True ($outcome.Status -eq 'completed') 'fresh blockcheck output must renew the soft runtime lease'
+        Assert-True ($outcome.LeaseRenewals -ge 1) 'fresh output past the soft limit must record a lease renewal'
+    }
+    finally {
+        Stop-Z2OProcessTree -Process $process
+    }
+    Assert-True (Wait-ProcessGone -Id $process.Id) 'a live output-producing process must finish normally'
+
     $stdout = Join-Path $temp 'limit.log'
     $stderr = Join-Path $temp 'limit.err.log'
     $childPidPath = Join-Path $temp 'limit-child.pid'
@@ -74,25 +122,23 @@ Start-Sleep -Seconds 30
     @"
 `$child = Start-Process -FilePath ping.exe -ArgumentList @('-t', '127.0.0.1') -PassThru
 Set-Content -LiteralPath '$childPidPath' -Value `$child.Id -Encoding ASCII
-for (`$i = 0; `$i -lt 100; `$i++) {
-    Add-Content -LiteralPath '$stdout' -Value "- curl_test_https_tls12 test `$i"
-    Start-Sleep -Milliseconds 200
-}
+Start-Sleep -Seconds 30
 "@ | Set-Content -LiteralPath $limitScript -Encoding ASCII
     $process = Start-Process -FilePath powershell.exe `
         -ArgumentList @('-NoLogo', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"{0}"' -f $limitScript)) `
         -PassThru -NoNewWindow
     try {
         $outcome = Wait-Z2OBlockcheckProcess -Process $process -StdoutPath $stdout -StderrPath $stderr `
-            -DisplayName 'watchdog-limit-test' -MaxRunSeconds 2 -StallSeconds 8 -HeartbeatSeconds 1
-        Assert-True ($outcome.Status -eq 'limit') 'progress must not bypass the total wall-clock limit'
+            -DisplayName 'watchdog-no-output-limit-test' -MaxRunSeconds 2 -StallSeconds 8 -HeartbeatSeconds 1
+        Assert-True ($outcome.Status -eq 'limit') 'a run with no output must not renew the soft limit'
+        Assert-True ($outcome.LeaseRenewals -eq 0) 'no-output run must not record a lease renewal'
     }
     finally {
         Stop-Z2OProcessTree -Process $process
     }
     $childId = [int](Get-Content -LiteralPath $childPidPath -Raw)
-    Assert-True (Wait-ProcessGone -Id $process.Id) 'wall-clock watchdog must stop the parent process'
-    Assert-True (Wait-ProcessGone -Id $childId) 'wall-clock watchdog must stop the child process tree'
+    Assert-True (Wait-ProcessGone -Id $process.Id) 'soft-limit watchdog must stop the parent process'
+    Assert-True (Wait-ProcessGone -Id $childId) 'soft-limit watchdog must stop the child process tree'
 
     $fakeRoot = Join-Path $temp 'private-root'
     $fakeBin = Join-Path $fakeRoot 'vendor\cygwin\bin'
