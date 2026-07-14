@@ -15,6 +15,14 @@ function Initialize-Z2OCygwinRuntime {
     New-Item -ItemType Directory -Path (Join-Path $InstallRoot 'vendor\cygwin\tmp') -Force | Out-Null
 }
 
+function Get-Z2ORunRoot {
+    param([Parameter(Mandatory)][string]$InstallRoot)
+    # Selection diagnostics must survive payload rollback. Keep them beside the
+    # transactional install tree, just like the installer transcript, rather
+    # than copying them out after a failure has already started unwinding.
+    return Join-Path ($InstallRoot + '.logs') 'runtime\runs'
+}
+
 function Get-Z2OIpMode {
     try {
         $defaultRoute = Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction Stop |
@@ -206,7 +214,8 @@ function Invoke-Z2OBlockcheckRun {
         [switch]$AllowPartialAtLimit
     )
 
-    $runDirectory = Join-Path $InstallRoot ('runtime\runs\{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmss'), $RunLabel)
+    $runDirectory = Join-Path (Get-Z2ORunRoot -InstallRoot $InstallRoot) `
+        ('{0}-{1}' -f (Get-Date -Format 'yyyyMMdd-HHmmssfff'), $RunLabel)
     New-Item -ItemType Directory -Path $runDirectory -Force | Out-Null
     $machinePath = Join-Path $runDirectory 'machine.tsv'
     $stdoutPath = Join-Path $runDirectory 'blockcheck.log'
@@ -512,6 +521,57 @@ function Test-Z2OCandidateCoverage {
     return $true
 }
 
+function Get-Z2OCoveredIpVersions {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidates,
+        [Parameter(Mandatory)]$Group,
+        [Parameter(Mandatory)][int[]]$Versions
+    )
+    return @($Versions | Where-Object {
+        Test-Z2OCandidateCoverage -Candidates $Candidates -Group $Group -Versions @($_)
+    })
+}
+
+function Select-Z2OValidatedCandidates {
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Candidates,
+        [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$Validated,
+        [Parameter(Mandatory)]$Group,
+        [int[]]$RequiredVersions = @(4)
+    )
+    $selected = @()
+    foreach ($version in @($Candidates | Select-Object -ExpandProperty IpVersion -Unique | Sort-Object)) {
+        $versionSelection = @()
+        $missingKind = $null
+        foreach ($kind in @(Get-Z2OExpectedKinds -Group $Group)) {
+            $order = @($Candidates | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } |
+                Sort-Object @{ Expression = { Get-Z2OProductionPenalty -Strategy $_.Strategy } }, Order)
+            $validStrategies = @($Validated | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } |
+                Select-Object -ExpandProperty Strategy)
+            $winner = $order | Where-Object { $validStrategies -contains $_.Strategy } | Select-Object -First 1
+            if (-not $winner) {
+                $missingKind = $kind
+                break
+            }
+            $versionSelection += $winner
+        }
+        if ($missingKind) {
+            if ($RequiredVersions -contains [int]$version) {
+                throw "No stable $missingKind strategy for $($Group.id), IPv$version."
+            }
+            Write-Warning "Skipping optional IPv$version for $($Group.id): validation found no stable $missingKind strategy."
+            continue
+        }
+        $selected += $versionSelection
+    }
+    foreach ($requiredVersion in $RequiredVersions) {
+        if (@($selected | Where-Object IpVersion -eq $requiredVersion).Count -eq 0) {
+            throw "No stable strategy set for required IPv$requiredVersion coverage of $($Group.id)."
+        }
+    }
+    return $selected
+}
+
 function New-Z2OValidationSuite {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
@@ -535,7 +595,8 @@ function Select-Z2OStableStrategies {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
         [Parameter(Mandatory)]$Group,
-        [Parameter(Mandatory)][object[]]$Candidates
+        [Parameter(Mandatory)][object[]]$Candidates,
+        [int[]]$RequiredVersions = @(4)
     )
     $suite = New-Z2OValidationSuite -InstallRoot $InstallRoot -Candidates $Candidates
     try {
@@ -553,18 +614,8 @@ function Select-Z2OStableStrategies {
         $run = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $validationGroup -TestName $suite.Name `
             -ScanLevel force -Repeats 5 -RunLabel "$($Group.id)-validation" -MaxRunSeconds 500 -StallSeconds 120
         $validated = @(Get-Z2OCandidatesFromRun -Run $run -Group $validationGroup)
-        $selected = @()
-        foreach ($version in @($Candidates | Select-Object -ExpandProperty IpVersion -Unique)) {
-            foreach ($kind in @(Get-Z2OExpectedKinds -Group $Group)) {
-                $order = @($Candidates | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } |
-                    Sort-Object @{ Expression = { Get-Z2OProductionPenalty -Strategy $_.Strategy } }, Order)
-                $validStrategies = @($validated | Where-Object { $_.IpVersion -eq $version -and $_.Kind -eq $kind } | Select-Object -ExpandProperty Strategy)
-                $winner = $order | Where-Object { $validStrategies -contains $_.Strategy } | Select-Object -First 1
-                if (-not $winner) { throw "No stable $kind strategy for $($Group.id), IPv$version." }
-                $selected += $winner
-            }
-        }
-        return $selected
+        return @(Select-Z2OValidatedCandidates -Candidates $Candidates -Validated $validated -Group $Group `
+            -RequiredVersions $RequiredVersions)
     }
     finally {
         Remove-Item -LiteralPath $suite.Path -Recurse -Force -ErrorAction SilentlyContinue
@@ -655,8 +706,9 @@ function Invoke-Z2OStrategySelectionCore {
             -AllowPartialAtLimit
         $candidates = @(Get-Z2OCandidatesFromRun -Run $discovery -Group $group)
 
-        $versions = if ((Get-Z2OIpMode) -eq '46') { @(4, 6) } else { @(4) }
-        if (-not (Test-Z2OCandidateCoverage -Candidates $candidates -Group $group -Versions $versions)) {
+        $scanVersions = if ((Get-Z2OIpMode) -eq '46') { @(4, 6) } else { @(4) }
+        $requiredVersions = @(4)
+        if (-not (Test-Z2OCandidateCoverage -Candidates $candidates -Group $group -Versions $requiredVersions)) {
             Write-Warning "The short list did not cover $($group.id); running a bounded standard fallback (not exhaustive force)."
             $fallback = Invoke-Z2OBlockcheckRun -InstallRoot $InstallRoot -Group $group -TestName 'standard' `
                 -ScanLevel standard -Repeats 1 -RunLabel "$($group.id)-fallback" -MaxRunSeconds 400 -StallSeconds 120 `
@@ -674,16 +726,23 @@ function Invoke-Z2OStrategySelectionCore {
                 Merge-Z2OCandidatePools -Candidates @($quickCommon + $fallbackCommon + $fallbackPool + $quickPool)
             ) -PerKind 2)
 
-            if (-not (Test-Z2OCandidateCoverage -Candidates $candidates -Group $group -Versions $versions)) {
-                throw "No bounded candidate pool covers every required protocol for $($group.id). Logs: $($fallback.Directory)"
+            if (-not (Test-Z2OCandidateCoverage -Candidates $candidates -Group $group -Versions $requiredVersions)) {
+                throw "No bounded candidate pool covers every required IPv4 protocol for $($group.id). Logs: $($fallback.Directory)"
             }
         }
+
+        $coveredVersions = @(Get-Z2OCoveredIpVersions -Candidates $candidates -Group $group -Versions $scanVersions)
+        if ($scanVersions -contains 6 -and $coveredVersions -notcontains 6) {
+            Write-Warning "$($group.id): IPv6 did not produce complete bounded coverage; continuing with required IPv4 coverage."
+        }
+        $candidates = @($candidates | Where-Object { $coveredVersions -contains [int]$_.IpVersion })
 
         # Validation cost is proportional to candidates x domains x protocols x
         # repeats. Never pass an unbounded set even when the quick suite found many.
         $candidates = @(Limit-Z2OCandidatePool -Candidates $candidates -PerKind 2)
 
-        $stable = @(Select-Z2OStableStrategies -InstallRoot $InstallRoot -Group $group -Candidates $candidates)
+        $stable = @(Select-Z2OStableStrategies -InstallRoot $InstallRoot -Group $group -Candidates $candidates `
+            -RequiredVersions $requiredVersions)
         foreach ($item in $stable) {
             $selections += [pscustomobject]@{
                 GroupId = $group.id

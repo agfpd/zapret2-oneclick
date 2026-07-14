@@ -238,6 +238,50 @@ function Set-Z2OWinDivertOwnership {
     Set-Content -LiteralPath $path -Value $Ownership -Encoding ASCII
 }
 
+function ConvertFrom-Z2ODriverServicePath {
+    param([AllowNull()][string]$PathName)
+    if ([string]::IsNullOrWhiteSpace($PathName)) { return $null }
+    $value = [Environment]::ExpandEnvironmentVariables($PathName.Trim().Trim('"'))
+    foreach ($prefix in @('\??\', '\\?\')) {
+        if ($value.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            $value = $value.Substring($prefix.Length)
+            break
+        }
+    }
+    foreach ($prefix in @('\SystemRoot\', 'SystemRoot\')) {
+        if ($value.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase)) {
+            return Join-Path $env:SystemRoot $value.Substring($prefix.Length)
+        }
+    }
+    return $value
+}
+
+function Get-Z2OWinDivertServiceBinaryPath {
+    try {
+        $driver = Get-CimInstance Win32_SystemDriver -Filter "Name='windivert'" -ErrorAction Stop |
+            Select-Object -First 1
+        if ($driver) { return ConvertFrom-Z2ODriverServicePath -PathName ([string]$driver.PathName) }
+    }
+    catch { }
+    return $null
+}
+
+function Wait-Z2OFileUnlocked {
+    param([Parameter(Mandatory)][string]$Path, [int]$TimeoutSeconds = 20)
+    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+    do {
+        if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return }
+        $stream = $null
+        try {
+            $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::None)
+            return
+        }
+        catch { Start-Sleep -Milliseconds 250 }
+        finally { if ($stream) { $stream.Dispose() } }
+    } while ((Get-Date) -lt $deadline)
+    throw "File is still locked after $TimeoutSeconds seconds: $Path"
+}
+
 function Wait-Z2OServiceAbsent {
     param([Parameter(Mandatory)][string]$Name, [int]$TimeoutSeconds = 20)
     $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -306,9 +350,15 @@ function Assert-Z2OServiceRunning {
 
 function Remove-Z2OWinDivertService {
     param([Parameter(Mandatory)][string]$InstallRoot)
-    if ((Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot) -ne 'owned') {
+    $ownership = Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot
+    $driverPath = Get-Z2OWinDivertServiceBinaryPath
+    $pathIsOwned = $driverPath -and (Test-Z2OPathUnderRoot -Path $driverPath -Root $InstallRoot)
+    if ($ownership -ne 'owned' -and -not $pathIsOwned) {
         Write-Warning 'WinDivert driver service was left in place because this installation did not record ownership of it.'
         return
+    }
+    if ($ownership -ne 'owned' -and $pathIsOwned) {
+        Write-Warning "WinDivert ownership marker is missing, but its loaded driver is under this InstallRoot; unloading $driverPath."
     }
     $otherConsumers = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -in @('winws.exe', 'winws2.exe', 'goodbyedpi.exe') }
@@ -322,6 +372,7 @@ function Remove-Z2OWinDivertService {
         Invoke-Z2OSc -Arguments @('delete', 'windivert') -AllowFailure | Out-Null
         Wait-Z2OServiceAbsent -Name 'windivert'
     }
+    if ($pathIsOwned) { Wait-Z2OFileUnlocked -Path $driverPath }
 }
 
 function Test-Z2OPathUnderRoot {

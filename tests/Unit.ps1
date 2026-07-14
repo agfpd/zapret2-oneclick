@@ -19,6 +19,7 @@ try {
     ) | Set-Content -LiteralPath $report -Encoding ASCII
     $records = @(Read-Z2OMachineReport -Path $report)
     $group = [pscustomobject]@{
+        id = 'alpha'
         probeDomains = @('alpha.test', 'beta.test')
         protocols = @('https-tls12', 'https-tls13')
     }
@@ -53,6 +54,30 @@ try {
     Assert-True ($limitedPool.Count -eq 2) 'candidate validation pool must be bounded per protocol kind'
     Assert-True (Test-Z2OCandidateCoverage -Candidates $limitedPool -Group $group -Versions @(4)) `
         'bounded TLS pool must report protocol-kind coverage'
+
+    $ipv4Candidate = [pscustomobject]@{
+        Kind = 'tls'; IpVersion = 4; Strategy = "'--strategy=ipv4'"; Order = 1; Degraded = $false
+    }
+    $ipv6Candidate = [pscustomobject]@{
+        Kind = 'tls'; IpVersion = 6; Strategy = "'--strategy=ipv6'"; Order = 2; Degraded = $false
+    }
+    $covered = @(Get-Z2OCoveredIpVersions -Candidates @($ipv4Candidate) -Group $group -Versions @(4, 6))
+    Assert-True ($covered.Count -eq 1 -and $covered[0] -eq 4) `
+        'IPv4 coverage must remain usable when optional IPv6 has no candidates'
+    $ipv4Only = @(Select-Z2OValidatedCandidates -Candidates @($ipv4Candidate, $ipv6Candidate) `
+        -Validated @($ipv4Candidate) -Group $group -RequiredVersions @(4))
+    Assert-True ($ipv4Only.Count -eq 1 -and $ipv4Only[0].IpVersion -eq 4) `
+        'failed optional IPv6 validation must not reject stable IPv4'
+    $dualStack = @(Select-Z2OValidatedCandidates -Candidates @($ipv4Candidate, $ipv6Candidate) `
+        -Validated @($ipv4Candidate, $ipv6Candidate) -Group $group -RequiredVersions @(4))
+    Assert-True ($dualStack.Count -eq 2) 'working IPv6 must remain selected alongside IPv4'
+    $requiredFailed = $false
+    try {
+        $null = Select-Z2OValidatedCandidates -Candidates @($ipv4Candidate) -Validated @() `
+            -Group $group -RequiredVersions @(4)
+    }
+    catch { $requiredFailed = $true }
+    Assert-True $requiredFailed 'missing required IPv4 validation must still fail closed'
 
     Assert-True ((Get-Z2OProductionPenalty -Strategy "'--lua-desync=oob:urp=midsld'") -gt
         (Get-Z2OProductionPenalty -Strategy "'--lua-desync=fake:blob=fake_default_tls'")) 'OOB must rank behind a stable payload strategy'
@@ -117,6 +142,11 @@ try {
     Assert-True ((Get-Z2OWinDivertOwnership -InstallRoot $install) -eq 'preexisting') 'preexisting driver ownership must be recorded'
     Set-Z2OWinDivertOwnership -InstallRoot $install -Ownership owned
     Assert-True ((Get-Z2OWinDivertOwnership -InstallRoot $install) -eq 'owned') 'owned driver state must be recorded'
+    $nativeDriver = ConvertFrom-Z2ODriverServicePath -PathName '\??\C:\ProgramData\zapret2-oneclick\WinDivert64.sys'
+    Assert-True ($nativeDriver -eq 'C:\ProgramData\zapret2-oneclick\WinDivert64.sys') `
+        'NT driver paths must normalize before physical InstallRoot ownership checks'
+    Assert-True (Test-Z2OPathUnderRoot -Path $nativeDriver -Root 'C:\ProgramData\zapret2-oneclick') `
+        'a loaded WinDivert.sys under InstallRoot must count as physically owned'
 
     $payloadSource = Join-Path $temp 'payload-source'
     $payloadInstall = Join-Path $temp 'payload-install'
@@ -139,6 +169,9 @@ try {
     New-Item -ItemType Directory -Path (Join-Path $transactionInstall 'runtime'),(Join-Path $transactionStage 'runtime') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $transactionInstall 'old.txt') -Value old -Encoding ASCII
     Set-Content -LiteralPath (Join-Path $transactionStage 'new.txt') -Value new -Encoding ASCII
+    $persistentRun = Join-Path (Get-Z2ORunRoot -InstallRoot $transactionInstall) 'failure-test\blockcheck.log'
+    New-Item -ItemType Directory -Path (Split-Path -Parent $persistentRun) -Force | Out-Null
+    Set-Content -LiteralPath $persistentRun -Value 'diagnostic survives rollback' -Encoding ASCII
     $snapshot = [pscustomobject]@{ WasPresent = $false; WasRunning = $false; HadWorkingConfig = $false }
     $transaction = New-Z2OUpgradeTransaction -InstallRoot $transactionInstall -StagedRoot $transactionStage `
         -ServiceSnapshot $snapshot
@@ -151,6 +184,8 @@ try {
         'transaction rollback must restore the old payload'
     Assert-True (-not (Test-Path -LiteralPath $transaction.StatePath)) `
         'transaction rollback must remove its durable journal'
+    Assert-True (Test-Path -LiteralPath $persistentRun -PathType Leaf) `
+        'blockcheck diagnostics in the sibling .logs tree must survive transaction rollback'
 
     Write-Host 'All unit tests passed.' -ForegroundColor Green
 }

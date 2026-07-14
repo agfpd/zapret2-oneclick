@@ -5,7 +5,8 @@ param(
     [switch]$NoStart,
     [switch]$Rescan,
     [switch]$Rollback,
-    [switch]$TestFailAfterPublish
+    [switch]$TestFailAfterPublish,
+    [switch]$TestFailAfterSelection
 )
 
 $ErrorActionPreference = 'Stop'
@@ -38,7 +39,7 @@ try {
         if (-not $NoStart) { Start-Z2OService }
         exit 0
     }
-    if ($TestFailAfterPublish -and $env:Z2O_ENABLE_TEST_HOOKS -ne '1') {
+    if (($TestFailAfterPublish -or $TestFailAfterSelection) -and $env:Z2O_ENABLE_TEST_HOOKS -ne '1') {
         throw 'The failure-injection hook is disabled.'
     }
 
@@ -88,6 +89,7 @@ try {
         Backup-Z2OActiveConfig -InstallRoot $InstallRoot
         Invoke-Z2OStrategySelection -InstallRoot $InstallRoot -Rescan:$Rescan
         Set-Z2OUpgradePhase -Transaction $transaction -Phase 'selection-complete'
+        if ($TestFailAfterSelection) { throw 'Induced failure after strategy selection.' }
     }
 
     $activeConfig = Join-Path $InstallRoot 'runtime\active.conf'
