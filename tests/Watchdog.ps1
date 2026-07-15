@@ -47,7 +47,10 @@ Start-Sleep -Seconds 30
 
     $stdout = Join-Path $temp 'cygwin.log'
     $stderr = Join-Path $temp 'cygwin.err.log'
+    $partialMachine = Join-Path $temp 'cygwin-partial.tsv'
     New-Item -ItemType File -Path $stdout, $stderr -Force | Out-Null
+    Set-Content -LiteralPath $partialMachine `
+        -Value "1`tpartial.test`tcurl_test_https_tls13`t4`t'--partial-result=must-not-be-used'" -Encoding ASCII
     $cygwinScript = Join-Path $temp 'cygwin.ps1'
     @"
 Set-Content -LiteralPath '$stderr' -Value '0 [main] curl 123 child_copy: cygheap read copy failed, Win32 error 299' -Encoding ASCII
@@ -60,6 +63,8 @@ Start-Sleep -Seconds 30
         $outcome = Wait-Z2OBlockcheckProcess -Process $process -StdoutPath $stdout -StderrPath $stderr `
             -DisplayName 'watchdog-cygwin-test' -MaxRunSeconds 10 -StallSeconds 8 -HeartbeatSeconds 1
         Assert-True ($outcome.Status -eq 'cygwin') 'Cygwin error 299 must abort and invalidate the attempt'
+        Assert-True (@(Read-Z2OMachineReport -Path $partialMachine).Count -eq 1) `
+            'failure injection must contain a tempting partial machine result'
     }
     finally {
         Stop-Z2OProcessTree -Process $process

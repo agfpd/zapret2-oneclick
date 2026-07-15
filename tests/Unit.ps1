@@ -1,5 +1,6 @@
 $ErrorActionPreference = 'Stop'
-$module = Join-Path (Split-Path -Parent $PSScriptRoot) 'launcher\Zapret2OneClick.psm1'
+$root = Split-Path -Parent $PSScriptRoot
+$module = Join-Path $root 'launcher\Zapret2OneClick.psm1'
 Import-Module $module -Force
 
 function Assert-True {
@@ -9,6 +10,7 @@ function Assert-True {
 
 $temp = Join-Path $env:TEMP ('z2o-unit-' + [Guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $temp -Force | Out-Null
+$nativeChild = $null
 try {
     $report = Join-Path $temp 'machine.tsv'
     @(
@@ -98,6 +100,54 @@ try {
         -Value '0 [main] curl 123 child_copy: cygheap read copy failed, Win32 error 299' -Encoding ASCII
     Assert-True (Test-Z2OCygwinFailureLog -Path $cygwinLog) `
         'Cygwin child_copy error 299 must invalidate an attempt'
+
+    $winwsPath = Join-Path $root 'vendor\zapret2\nfq2\winws2.exe'
+    $winwsBytes = [IO.File]::ReadAllBytes($winwsPath)
+    $peOffset = [BitConverter]::ToInt32($winwsBytes, 0x3c)
+    $dllCharacteristics = [BitConverter]::ToUInt16($winwsBytes, $peOffset + 24 + 70)
+    Assert-True (($dllCharacteristics -band 0x20) -ne 0) `
+        'the exact upstream winws2 regression fixture must remain HIGH_ENTROPY_VA-enabled'
+
+    $capturePath = Join-Path $temp 'native-child-args.bin'
+    $cygwinBash = Join-Path $root 'vendor\cygwin\bin\bash.exe'
+    $captureCygwinPath = (& (Join-Path $root 'vendor\cygwin\bin\cygpath.exe') -u $capturePath).Trim()
+    $pidFile = Join-Path $temp 'native-child.pid'
+    $argumentFile = Join-Path $temp 'native-child.args'
+    $nativeSpawner = Join-Path $root 'launcher\Start-NativeProcess.ps1'
+    $expectedChildArguments = @('--leading-option=value', 'plain', 'two words', 'quote"inside', 'trailing\', '')
+    $captureCommand = 'out=$1; shift; printf ''%s\0'' "$@" > "$out"; end=$((SECONDS+1)); while ((SECONDS<end)); do :; done'
+    $childArguments = @('-c', $captureCommand, '_', $captureCygwinPath) + $expectedChildArguments
+    $argumentBytes = [Text.Encoding]::UTF8.GetBytes((($childArguments -join "`0") + "`0"))
+    [IO.File]::WriteAllBytes($argumentFile, $argumentBytes)
+    & $nativeSpawner -PidFile $pidFile -FilePath $cygwinBash `
+        -ArgumentFile $argumentFile -Verbose
+    $nativeChildId = [int](Get-Content -LiteralPath $pidFile -Raw)
+    $nativeChild = Get-Process -Id $nativeChildId -ErrorAction Stop
+    Wait-Process -InputObject $nativeChild -Timeout 5 -ErrorAction Stop
+    $capturedBytes = [IO.File]::ReadAllBytes($capturePath)
+    $capturedChildArguments = New-Object Collections.Generic.List[string]
+    $capturedStart = 0
+    for ($i = 0; $i -lt $capturedBytes.Length; $i++) {
+        if ($capturedBytes[$i] -ne 0) { continue }
+        $capturedChildArguments.Add([Text.Encoding]::UTF8.GetString(
+            $capturedBytes, $capturedStart, $i - $capturedStart))
+        $capturedStart = $i + 1
+    }
+    Assert-True ($capturedStart -eq $capturedBytes.Length) `
+        'Cygwin argv capture must be NUL-terminated'
+    Assert-True ($capturedChildArguments.Count -eq $expectedChildArguments.Count) `
+        ("native spawner must preserve the child argv count (expected={0}; actual={1}; values={2})" -f `
+            $expectedChildArguments.Count, $capturedChildArguments.Count, ($capturedChildArguments -join '|'))
+    for ($i = 0; $i -lt $expectedChildArguments.Count; $i++) {
+        Assert-True ($capturedChildArguments[$i] -ceq $expectedChildArguments[$i]) `
+            "native spawner must preserve child argv item $i"
+    }
+
+    $blockcheckRunBody = (Get-Command Invoke-Z2OBlockcheckRun).ScriptBlock.ToString()
+    Assert-True ($blockcheckRunBody -notmatch 'overallStartedAt|remainingSeconds') `
+        'a late Cygwin failure must receive a fresh bounded retry lease'
+    Assert-True ($blockcheckRunBody -match 'Remove-Item -LiteralPath \$stdoutPath, \$stderrPath, \$machinePath') `
+        'every retry must discard partial stdout, stderr, and machine results before restarting'
 
     $preflightInput = Join-Path $temp 'preflight-input.conf'
     @("'--wf-tcp-out=443'", "'--wf-udp-out=443'", "'--wf-raw-part=@filter.txt'", "'--filter-l7=tls'") |
@@ -201,5 +251,12 @@ try {
     Write-Host 'All unit tests passed.' -ForegroundColor Green
 }
 finally {
+    if ($nativeChild) {
+        $nativeChild.Refresh()
+        if (-not $nativeChild.HasExited) {
+            Stop-Process -InputObject $nativeChild -Force -ErrorAction SilentlyContinue
+            $null = $nativeChild.WaitForExit(5000)
+        }
+    }
     Remove-Item -LiteralPath $temp -Recurse -Force -ErrorAction SilentlyContinue
 }

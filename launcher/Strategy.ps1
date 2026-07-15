@@ -284,6 +284,8 @@ function Invoke-Z2OBlockcheckRun {
     $scriptPath = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path (Join-Path $zapretRoot 'blockcheck2.sh')
     $curlPath = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path (Join-Path $cygLocalBin 'curl.exe')
     $machineCyg = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path $machinePath
+    $nativeSpawner = ConvertTo-Z2OCygwinPath -InstallRoot $InstallRoot -Path `
+        (Join-Path $InstallRoot 'launcher\Start-NativeProcess.ps1')
 
     $protocols = @($Group.protocols)
     $variables = @{
@@ -303,6 +305,7 @@ function Invoke-Z2OBlockcheckRun {
         CURL_MAX_TIME_QUIC = '8'
         CURL = $curlPath
         MACHINE_REPORT = $machineCyg
+        Z2O_WINWS2_SPAWNER = $nativeSpawner
     }
 
     $saved = @{}
@@ -315,13 +318,8 @@ function Invoke-Z2OBlockcheckRun {
         $env:PATH = "$cygBin;$cygLocalBin;$env:SystemRoot\System32;$env:SystemRoot"
 
         $attempt = 0
-        $overallStartedAt = Get-Date
         while ($true) {
             $attempt++
-            $remainingSeconds = $MaxRunSeconds - [int]((Get-Date) - $overallStartedAt).TotalSeconds
-            if ($remainingSeconds -lt 2) {
-                throw "blockcheck2 exhausted the ${MaxRunSeconds}s retry budget for $($Group.id). Live log: $stdoutPath"
-            }
             Remove-Item -LiteralPath $stdoutPath, $stderrPath, $machinePath -Force -ErrorAction SilentlyContinue
             Write-Host ("blockcheck2: {0}, test={1}, scan={2}, repeats={3}, soft limit={4}s, stall limit={5}s" -f `
                 $Group.displayName, $TestName, $ScanLevel, $Repeats, $MaxRunSeconds, $StallSeconds) -ForegroundColor Cyan
@@ -336,7 +334,7 @@ function Invoke-Z2OBlockcheckRun {
                 # WaitForExit(timeout) can leave ExitCode unavailable after the process exits.
                 $null = $process.Handle
                 $outcome = Wait-Z2OBlockcheckProcess -Process $process -StdoutPath $stdoutPath -StderrPath $stderrPath `
-                    -DisplayName $Group.displayName -MaxRunSeconds $remainingSeconds -StallSeconds $StallSeconds
+                    -DisplayName $Group.displayName -MaxRunSeconds $MaxRunSeconds -StallSeconds $StallSeconds
                 if ($outcome.Status -eq 'completed') { $exitCode = $process.ExitCode }
             }
             finally {
@@ -357,6 +355,9 @@ function Invoke-Z2OBlockcheckRun {
                 if ($attempt -le $CygwinRetries) {
                     Write-Warning ("Cygwin process creation failed during blockcheck2; discarding attempt {0} and retrying. Diagnostic: {1}{2}" -f `
                         $attempt, $stderrPath, $archiveSuffix)
+                    # Give terminated Cygwin descendants and security scanners a
+                    # short quiet interval before creating a fresh process tree.
+                    Start-Sleep -Seconds 2
                     continue
                 }
                 throw "Cygwin process creation failed repeatedly for $($Group.id); results were discarded. Diagnostic: $stderrPath$archiveSuffix"

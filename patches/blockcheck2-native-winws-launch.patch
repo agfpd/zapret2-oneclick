@@ -1,0 +1,56 @@
+--- a/blockcheck2.sh
++++ b/blockcheck2.sh
+@@ -952,17 +952,50 @@
+ 		CYGWIN)
+ 			# allow multiple PKTWS instances with the same wf filter but different ipset
+ 			# some methods require empty acks
+-			"$WINWS2" --wf-dup-check=0 --wf-tcp-empty=1 $WF --ipset="$IPSET_FILE" --lua-init=@"$ZAPRET_BASE/lua/zapret-lib.lua" --lua-init=@"$ZAPRET_BASE/lua/zapret-antidpi.lua" "$@" >/dev/null &
++			# winws2 is HIGH_ENTROPY_VA-enabled. Starting it as a Cygwin
++			# fork/exec child can collide with the fixed cygheap range and fail
++			# child_copy with Win32 error 299. A native PowerShell parent starts
++			# the exact official binary with high-entropy ASLR disabled only for
++			# this short-lived blockcheck child; no cygheap is copied into it.
++			# NUL-delimited argv preserves shell tokens, and the PID file avoids a
++			# command-substitution pipe that winws2 would keep open for its lifetime.
++			[ -n "$Z2O_WINWS2_SPAWNER" ] && [ -f "$Z2O_WINWS2_SPAWNER" ] || {
++				echo "Z2O native winws2 spawner is unavailable" >&2
++				return 1
++			}
++			local pidfile="${PARALLEL_OUT}.winws.pid"
++			local argfile="${PARALLEL_OUT}.winws.args"
++			rm -f "$pidfile" "$argfile"
++			printf '%s\0' --wf-dup-check=0 --wf-tcp-empty=1 $WF \
++				--ipset="$IPSET_FILE" \
++				--lua-init=@"$ZAPRET_BASE/lua/zapret-lib.lua" \
++				--lua-init=@"$ZAPRET_BASE/lua/zapret-antidpi.lua" "$@" >"$argfile"
++			powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
++				-File "$(cygpath -w "$Z2O_WINWS2_SPAWNER")" \
++				-PidFile "$(cygpath -w "$pidfile")" -FilePath "$(cygpath -w "$WINWS2")" \
++				-ArgumentFile "$(cygpath -w "$argfile")" >/dev/null || {
++				rm -f "$pidfile" "$argfile"
++				return 1
++			}
++			read PID <"$pidfile" || {
++				rm -f "$pidfile" "$argfile"
++				return 1
++			}
++			rm -f "$pidfile" "$argfile"
+ 			;;
+ 	esac
+-	PID=$!
++	[ "$UNAME" = CYGWIN ] || PID=$!
+ 	# give some time to initialize
+ 	minsleep
+ }
+ ws_kill()
+ {
+ 	[ -z "$PID" ] || {
+-		killwait -9 $PID 2>/dev/null
++		if [ "$UNAME" = CYGWIN ] && [ -n "$Z2O_WINWS2_SPAWNER" ]; then
++			taskkill.exe /PID "$PID" /T /F >/dev/null 2>&1
++		else
++			killwait -9 $PID 2>/dev/null
++		fi
+ 		PID=
+ 	}
+ }
