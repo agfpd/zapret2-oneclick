@@ -148,6 +148,17 @@ try {
     Assert-True (Test-Z2OPathUnderRoot -Path $nativeDriver -Root 'C:\ProgramData\zapret2-oneclick') `
         'a loaded WinDivert.sys under InstallRoot must count as physically owned'
 
+    $serviceAssertionBody = (Get-Command Assert-Z2OServiceRunning).ScriptBlock.ToString()
+    Assert-True ($serviceAssertionBody -notmatch 'Invoke-Z2OSc') `
+        'service state checks must not parse localized sc.exe output'
+    Assert-Z2OServiceRunning -Name 'EventLog' -TimeoutSeconds 2
+    $missingServiceFailed = $false
+    try { Assert-Z2OServiceRunning -Name ('z2o-unit-' + [Guid]::NewGuid().ToString('N')) -TimeoutSeconds 1 }
+    catch {
+        $missingServiceFailed = $_.Exception.Message -match 'service not found'
+    }
+    Assert-True $missingServiceFailed 'a missing service must report locale-independent SCM diagnostics'
+
     $payloadSource = Join-Path $temp 'payload-source'
     $payloadInstall = Join-Path $temp 'payload-install'
     New-Item -ItemType Directory -Path (Join-Path $payloadSource 'config'),(Join-Path $payloadSource 'checksums'),(Join-Path $payloadInstall 'runtime') -Force | Out-Null

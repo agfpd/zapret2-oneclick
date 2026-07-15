@@ -339,13 +339,28 @@ function Start-Z2OService {
 
 function Assert-Z2OServiceRunning {
     param([string]$Name = $script:Z2OServiceName, [int]$TimeoutSeconds = 15)
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    do {
-        $result = Invoke-Z2OSc -Arguments @('query', $Name) -AllowFailure
-        if (($result.Output -join "`n") -match 'STATE\s+:\s+4\s+RUNNING') { return }
-        Start-Sleep -Milliseconds 500
-    } while ((Get-Date) -lt $deadline)
-    throw "Service $Name did not reach RUNNING."
+    # Get-Service returns a typed ServiceController state. Do not parse sc.exe
+    # text: its field labels are localized (for example, STATE vs СОСТОЯНИЕ).
+    $controller = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    $waitFailure = $null
+    if ($controller) {
+        try {
+            $runningStatus = [Enum]::Parse($controller.Status.GetType(), 'Running')
+            $controller.WaitForStatus($runningStatus, [TimeSpan]::FromSeconds($TimeoutSeconds))
+            return
+        }
+        catch { $waitFailure = $_ }
+        finally { $controller.Dispose() }
+    }
+
+    $service = Get-CimInstance Win32_Service -Filter ("Name='{0}'" -f $Name) -ErrorAction SilentlyContinue
+    $details = if ($service) {
+        'state={0}, status={1}, exitCode={2}, serviceSpecificExitCode={3}, processId={4}' -f `
+            $service.State, $service.Status, $service.ExitCode, $service.ServiceSpecificExitCode, $service.ProcessId
+    }
+    else { 'service not found' }
+    if ($waitFailure) { $details += '; waitError=' + $waitFailure.Exception.Message }
+    throw "Service $Name did not reach RUNNING within $TimeoutSeconds seconds ($details)."
 }
 
 function Remove-Z2OWinDivertService {
