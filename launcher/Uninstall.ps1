@@ -13,8 +13,11 @@ if (-not (Test-Z2OAdministrator)) {
 }
 
 try {
-    Remove-Z2OService
-    Remove-Z2OWinDivertService -InstallRoot $InstallRoot
+    $serviceName = Get-Z2OServiceName -InstallRoot $InstallRoot
+    Remove-Z2OService -Name $serviceName
+    if (Test-Z2ODefaultInstallRoot -InstallRoot $InstallRoot) {
+        Remove-Z2OWinDivertService -InstallRoot $InstallRoot
+    }
 
     if (Test-Path -LiteralPath $InstallRoot) {
         if ($KeepLogs) {

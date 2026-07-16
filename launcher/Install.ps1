@@ -28,6 +28,8 @@ $stagedRoot = $null
 $transaction = $null
 $takeoverStarted = $false
 $serviceSnapshot = $null
+$serviceName = Get-Z2OServiceName -InstallRoot $InstallRoot
+$isDefaultInstall = Test-Z2ODefaultInstallRoot -InstallRoot $InstallRoot
 try {
     Write-Host 'zapret2-oneclick: installer' -ForegroundColor Cyan
     Assert-Z2OSupportedPlatform
@@ -35,31 +37,54 @@ try {
     if ($Rollback) {
         $installerLock = Enter-Z2OInstallerLock -InstallRoot $InstallRoot
         Set-Z2OInstallerLockPhase -Lock $installerLock -Phase 'manual-rollback'
-        Restore-Z2OPreviousConfig -InstallRoot $InstallRoot
-        if (-not $NoStart) { Start-Z2OService }
+        Restore-Z2OPreviousConfig -InstallRoot $InstallRoot -ServiceName $serviceName
+        if (-not $NoStart) {
+            Start-Z2OService -Name $serviceName
+            Assert-Z2OServiceRunning -Name $serviceName
+        }
         exit 0
     }
     if (($TestFailAfterPublish -or $TestFailAfterSelection) -and $env:Z2O_ENABLE_TEST_HOOKS -ne '1') {
         throw 'The failure-injection hook is disabled.'
     }
 
-    # Validate and stage every byte of the new payload while the current
-    # service is still running. A corrupt archive or incompatible config must
-    # not cause downtime.
+    # Recover any interrupted publication before inspecting the active tree.
+    # Lock/service identities are derived from InstallRoot, so a scratch-root
+    # failure test cannot touch the production lock or service (H3).
     Test-Z2OVendorManifest -SourceRoot $sourceRoot
-    $stagedRoot = New-Z2OPayloadStage -SourceRoot $sourceRoot -InstallRoot $InstallRoot
-    Test-Z2ONewPayloadPreflight -StagedRoot $stagedRoot -InstallRoot $InstallRoot
-
     $installerLock = Enter-Z2OInstallerLock -InstallRoot $InstallRoot
     Set-Z2OInstallerLockPhase -Lock $installerLock -Phase 'recovering-stale-transaction'
     Restore-Z2OStaleUpgradeIfNeeded -InstallRoot $InstallRoot
 
-    $serviceSnapshot = Get-Z2OServiceSnapshot -InstallRoot $InstallRoot
-    $winDivertOwnership = Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot
+    # Validate, stage and select against the new payload while the current
+    # service is still running. Selection is the slowest/fallible phase and
+    # must not sit inside the takeover transaction (B5).
+    $stagedRoot = New-Z2OPayloadStage -SourceRoot $sourceRoot -InstallRoot $InstallRoot
+    if (Test-Path -LiteralPath $InstallRoot -PathType Container) {
+        Copy-Z2ORuntimeState -SourceRoot $InstallRoot -DestinationRoot $stagedRoot
+    }
+    Test-Z2ONewPayloadPreflight -StagedRoot $stagedRoot -InstallRoot $InstallRoot
+    if (-not $SkipSelection) {
+        Set-Z2OInstallerLockPhase -Lock $installerLock -Phase 'selection-before-takeover'
+        Invoke-Z2OStrategySelection -InstallRoot $stagedRoot -Rescan:$Rescan `
+            -RunRoot (Get-Z2ORunRoot -InstallRoot $InstallRoot) -PublishedInstallRoot $InstallRoot
+        if ($TestFailAfterSelection) { throw 'Induced failure after strategy selection.' }
+    }
+
+    $activeConfig = Join-Path $stagedRoot 'runtime\active.conf'
+    if (-not (Test-Path -LiteralPath $activeConfig -PathType Leaf)) {
+        throw "No active configuration exists at $activeConfig. Run selection or provide a validated active.conf."
+    }
+    Test-Z2OStagedPublishedConfig -StagedRoot $stagedRoot -PublishedRoot $InstallRoot -ConfigPath $activeConfig
+
+    $serviceSnapshot = Get-Z2OServiceSnapshot -InstallRoot $InstallRoot -Name $serviceName
+    $winDivertOwnership = if ($isDefaultInstall) {
+        Get-Z2OWinDivertOwnership -InstallRoot $InstallRoot
+    } else { 'preexisting' }
     if ($winDivertOwnership -eq 'unknown') {
         # A running installation predating the ownership marker owns the driver.
         # Otherwise an already registered WinDivert service belongs to another product.
-        $winDivertOwnership = if (Test-Z2OScServicePresent -Name 'zapret2-oneclick') {
+        $winDivertOwnership = if (Test-Z2OScServicePresent -Name $serviceName) {
             'owned'
         } elseif (Test-Z2OScServicePresent -Name 'windivert') {
             'preexisting'
@@ -69,8 +94,8 @@ try {
     }
     Set-Z2OInstallerLockPhase -Lock $installerLock -Phase 'takeover'
     $takeoverStarted = $true
-    Stop-Z2OConflictingProcesses -InstallRoot $InstallRoot
-    if ($winDivertOwnership -eq 'owned' -and (Test-Path -LiteralPath $InstallRoot)) {
+    Stop-Z2OConflictingProcesses -InstallRoot $InstallRoot -ServiceName $serviceName
+    if ($isDefaultInstall -and $winDivertOwnership -eq 'owned' -and (Test-Path -LiteralPath $InstallRoot)) {
         # A failed/retired selection can leave our kernel driver loaded and its
         # payload .sys locked. Stop our owned driver before atomically replacing
         # the payload; never touch a driver recorded as preexisting.
@@ -84,24 +109,16 @@ try {
     Test-Z2OVendorManifest -SourceRoot $InstallRoot
     if ($TestFailAfterPublish) { throw 'Induced failure after payload publication.' }
 
-    if (-not $SkipSelection) {
-        Set-Z2OInstallerLockPhase -Lock $installerLock -Phase 'selection'
-        Backup-Z2OActiveConfig -InstallRoot $InstallRoot
-        Invoke-Z2OStrategySelection -InstallRoot $InstallRoot -Rescan:$Rescan
-        Set-Z2OUpgradePhase -Transaction $transaction -Phase 'selection-complete'
-        if ($TestFailAfterSelection) { throw 'Induced failure after strategy selection.' }
-    }
-
     $activeConfig = Join-Path $InstallRoot 'runtime\active.conf'
     if (-not (Test-Path -LiteralPath $activeConfig -PathType Leaf)) {
         throw "No active configuration exists at $activeConfig. Run selection or provide a validated active.conf."
     }
 
     Test-Z2OWinwsConfig -InstallRoot $InstallRoot -ConfigPath $activeConfig
-    Install-Z2OService -InstallRoot $InstallRoot -ConfigPath $activeConfig
+    Install-Z2OService -InstallRoot $InstallRoot -ConfigPath $activeConfig -Name $serviceName
     if (-not $NoStart) {
-        Start-Z2OService
-        Assert-Z2OServiceRunning
+        Start-Z2OService -Name $serviceName
+        Assert-Z2OServiceRunning -Name $serviceName
     }
     Complete-Z2OUpgradeTransaction -Transaction $transaction
     $transaction = $null
@@ -122,9 +139,9 @@ catch {
             (Test-Path -LiteralPath $InstallRoot -PathType Container)) {
             $activeConfig = Join-Path $InstallRoot 'runtime\active.conf'
             Test-Z2OWinwsConfig -InstallRoot $InstallRoot -ConfigPath $activeConfig
-            Install-Z2OService -InstallRoot $InstallRoot -ConfigPath $activeConfig
-            Start-Z2OService
-            Assert-Z2OServiceRunning
+            Install-Z2OService -InstallRoot $InstallRoot -ConfigPath $activeConfig -Name $serviceName
+            Start-Z2OService -Name $serviceName
+            Assert-Z2OServiceRunning -Name $serviceName
         }
     }
     catch { $rollbackFailure = $_ }

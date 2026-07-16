@@ -1,39 +1,58 @@
-diff --git a/blockcheck2.d/custom/10-list.sh b/blockcheck2.d/custom/10-list.sh
 --- a/blockcheck2.d/custom/10-list.sh
 +++ b/blockcheck2.d/custom/10-list.sh
-@@ -19,7 +19,10 @@ check_list()
+@@ -9,7 +9,8 @@
+ 	# $2 - domain
+ 	# $3 - file
+ 
+-	local line ok=0
++	local line ok=0 successes=0 target_successes
++	target_successes=${QUICK_MAX_SUCCESSES:-2}
+ 	[ -f "$3" ] || {
+ 		echo "no strategy file '$3'"
+ 		return 1
+@@ -19,7 +20,11 @@
  			""|\#*) continue ;;
  		esac
  		line=$(echo "$line" | tr -d "\r\n")
 -		eval pktws_curl_test_update "$1" "$2" $line && ok=1
 +		if eval pktws_curl_test_update "$1" "$2" $line; then
 +			ok=1
-+			[ "$SCANLEVEL" = quick ] && break
++			successes=$(($successes+1))
++			[ "$SCANLEVEL" = quick ] && [ "$successes" -ge "$target_successes" ] && break
 +		fi
  	done < "$3"
  
  	[ "$ok" = 1 ]
-diff --git a/blockcheck2.d/custom/list_https_tls12.txt b/blockcheck2.d/custom/list_https_tls12.txt
 --- a/blockcheck2.d/custom/list_https_tls12.txt
 +++ b/blockcheck2.d/custom/list_https_tls12.txt
-@@ -1,5 +1,8 @@
+@@ -1,4 +1,13 @@
  # write nfqws2 parameters here
  # WARNING : parameters with special symbols like "<" must be escaped or will cause error
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multisplit:pos=10,midsld:seqovl=1
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000:tls_mod=rnd,dupsid,padencap:repeats=1
- --payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
- --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=1
- --in-range=-s1 --lua-desync=oob:urp=midsld
-diff --git a/blockcheck2.d/custom/list_https_tls13.txt b/blockcheck2.d/custom/list_https_tls13.txt
++--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
++--payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=1
++--in-range=-s1 --lua-desync=oob:urp=midsld
++--payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
++--payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld
++--payload=tls_client_hello --lua-desync=multisplit:pos=10,midsld:seqovl=1
+ --payload tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000
+ --payload=tls_client_hello --lua-desync=fake:blob=0x00000000:tcp_md5:repeats=1 --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2
 --- a/blockcheck2.d/custom/list_https_tls13.txt
 +++ b/blockcheck2.d/custom/list_https_tls13.txt
-@@ -1,5 +1,8 @@
+@@ -1,5 +1,14 @@
  # write nfqws2 parameters here
  # WARNING : parameters with special symbols like "<" must be escaped or will cause error
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=multisplit:pos=10,midsld:seqovl=1
 +--lua-desync=wssize:wsize=1:scale=6 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000:tls_mod=rnd,dupsid,padencap:repeats=1
- --payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
- --payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=1
- --in-range=-s1 --lua-desync=oob:urp=midsld
++--payload=tls_client_hello --lua-desync=tcpseg:pos=0,1:ip_id=rnd:repeats=1
++--payload=tls_client_hello --lua-desync=tcpseg:pos=0,midsld:ip_id=rnd:repeats=1
++--in-range=-s1 --lua-desync=oob:urp=midsld
++--payload=tls_client_hello --lua-desync=multidisorder:pos=midsld
++--payload=tls_client_hello --lua-desync=multidisorder:pos=1,midsld
++--payload=tls_client_hello --lua-desync=multisplit:pos=10,midsld:seqovl=1
+ --payload tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000
+ --payload tls_client_hello --lua-desync=tcpseg:pos=0,-1:seqovl=1 --lua-desync=drop
+ --payload tls_client_hello --lua-desync=luaexec:code="desync.pat=tls_mod(fake_default_tls,'rnd,rndsni,dupsid,padencap',desync.reasm_data)" --lua-desync=tcpseg:pos=0,-1:seqovl=#pat:seqovl_pattern=pat --lua-desync=drop

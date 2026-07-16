@@ -1,19 +1,23 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "scopeStatus": "example-only",
+  "ipVersions": [4],
   "groups": [
     {
       "id": "youtube",
+      "required": true,
+      "requiredKinds": ["tls"],
       "hostlist": "hostlists/youtube.txt",
       "probeDomains": ["www.youtube.com", "youtube.com"],
       "protocols": ["https-tls12", "https-tls13", "quic"]
     },
     {
       "id": "discord-web",
+      "required": false,
+      "requiredKinds": ["tls"],
       "hostlist": "hostlists/discord.txt",
       "probeDomains": ["discord.com"],
       "protocols": ["https-tls12", "https-tls13"]
     }
   ]
 }
-

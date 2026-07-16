@@ -65,7 +65,10 @@ fi
 
 patch -d "$ROOT/vendor/zapret2" -p1 <"$ROOT/patches/blockcheck2-machine-report.patch"
 patch -d "$ROOT/vendor/zapret2" -p1 <"$ROOT/patches/blockcheck2-custom-candidates.patch"
-patch -d "$ROOT/vendor/zapret2" -p1 <"$ROOT/patches/blockcheck2-native-winws-launch.patch"
+python3 "$ROOT/build/set-cygwin-pe-flags.py" --disable-aslr \
+  "$ROOT/vendor/zapret2/nfq2/winws2.exe" \
+  "$ROOT/vendor/zapret2/service/winws2.exe" \
+  "$ROOT/vendor/zapret2/mdig/mdig.exe"
 "$ROOT/build/verify-official-binaries.sh"
 "$ROOT/build/update-manifest.sh"
 

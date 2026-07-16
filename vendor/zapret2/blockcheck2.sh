@@ -952,50 +952,17 @@ pktws_start()
 		CYGWIN)
 			# allow multiple PKTWS instances with the same wf filter but different ipset
 			# some methods require empty acks
-			# winws2 is HIGH_ENTROPY_VA-enabled. Starting it as a Cygwin
-			# fork/exec child can collide with the fixed cygheap range and fail
-			# child_copy with Win32 error 299. A native PowerShell parent starts
-			# the exact official binary with high-entropy ASLR disabled only for
-			# this short-lived blockcheck child; no cygheap is copied into it.
-			# NUL-delimited argv preserves shell tokens, and the PID file avoids a
-			# command-substitution pipe that winws2 would keep open for its lifetime.
-			[ -n "$Z2O_WINWS2_SPAWNER" ] && [ -f "$Z2O_WINWS2_SPAWNER" ] || {
-				echo "Z2O native winws2 spawner is unavailable" >&2
-				return 1
-			}
-			local pidfile="${PARALLEL_OUT}.winws.pid"
-			local argfile="${PARALLEL_OUT}.winws.args"
-			rm -f "$pidfile" "$argfile"
-			printf '%s\0' --wf-dup-check=0 --wf-tcp-empty=1 $WF \
-				--ipset="$IPSET_FILE" \
-				--lua-init=@"$ZAPRET_BASE/lua/zapret-lib.lua" \
-				--lua-init=@"$ZAPRET_BASE/lua/zapret-antidpi.lua" "$@" >"$argfile"
-			powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass \
-				-File "$(cygpath -w "$Z2O_WINWS2_SPAWNER")" \
-				-PidFile "$(cygpath -w "$pidfile")" -FilePath "$(cygpath -w "$WINWS2")" \
-				-ArgumentFile "$(cygpath -w "$argfile")" >/dev/null || {
-				rm -f "$pidfile" "$argfile"
-				return 1
-			}
-			read PID <"$pidfile" || {
-				rm -f "$pidfile" "$argfile"
-				return 1
-			}
-			rm -f "$pidfile" "$argfile"
+			"$WINWS2" --wf-dup-check=0 --wf-tcp-empty=1 $WF --ipset="$IPSET_FILE" --lua-init=@"$ZAPRET_BASE/lua/zapret-lib.lua" --lua-init=@"$ZAPRET_BASE/lua/zapret-antidpi.lua" "$@" >/dev/null &
 			;;
 	esac
-	[ "$UNAME" = CYGWIN ] || PID=$!
+	PID=$!
 	# give some time to initialize
 	minsleep
 }
 ws_kill()
 {
 	[ -z "$PID" ] || {
-		if [ "$UNAME" = CYGWIN ] && [ -n "$Z2O_WINWS2_SPAWNER" ]; then
-			taskkill.exe /PID "$PID" /T /F >/dev/null 2>&1
-		else
-			killwait -9 $PID 2>/dev/null
-		fi
+		killwait -9 $PID 2>/dev/null
 		PID=
 	}
 }
@@ -1031,7 +998,10 @@ curl_test()
 	# $2 - domain
 	# $3 - subst ip
 	# $4 - param of test function
-	local code=0 n=0 p pids
+	local code=0 n=0 p pids successes=0 required_successes
+	required_successes=${MIN_SUCCESSES:-$REPEATS}
+	[ "$required_successes" -ge 1 ] 2>/dev/null || required_successes=$REPEATS
+	[ "$required_successes" -le "$REPEATS" ] 2>/dev/null || required_successes=$REPEATS
 
 	if [ "$PARALLEL" = 1 ]; then
 		rm -f "${PARALLEL_OUT}"*
@@ -1043,6 +1013,7 @@ curl_test()
 		for p in $pids; do
 			[ $REPEATS -gt 1 ] && printf "[attempt $n] "
 			if wait $p; then
+				successes=$(($successes+1))
 				[ $REPEATS -gt 1 ] && echo 'AVAILABLE'
 			else
 				code=$?
@@ -1056,12 +1027,18 @@ curl_test()
 			n=$(($n+1))
 			[ $REPEATS -gt 1 ] && printf "[attempt $n] "
 			if $1 "$IPV" "$2" $3 "$4" ; then
+				successes=$(($successes+1))
 				[ $REPEATS -gt 1 ] && echo 'AVAILABLE'
 			else
 				code=$?
 				[ "$SCANLEVEL" = quick ] && break
 			fi
 		done
+	fi
+	if [ "$successes" -ge "$required_successes" ]; then
+		code=0
+	elif [ "$code" = 0 ]; then
+		code=254
 	fi
 	[ "$4" = detail ] || {
 		if [ $code = 254 ]; then
@@ -1116,7 +1093,7 @@ pktws_curl_test()
 	[ "$code" = 0 ] && {
 		strategy="$@"
 		strategy_append_extra_pktws
-		machine_report_append "$dom" "$testf" "$IPV" "$@"
+		machine_report_append "$dom" "$testf" "$IPV" ok "$@"
 		report_append "$dom" "$testf ipv${IPV}" "$PKTWSD ${WF:+$WF }$strategy"
 	}
 	return $code
@@ -1124,18 +1101,19 @@ pktws_curl_test()
 
 machine_report_append()
 {
-	# Opt-in stable output for wrappers. Strategy arguments never contain tabs/newlines.
-	# $1 domain, $2 test function, $3 IP version, $4... strategy argv
+	# Opt-in stable output for wrappers. One printf emits one complete record so
+	# a watchdog stop cannot expose a torn-but-parseable strategy line.
+	# $1 domain, $2 test function, $3 IP version, $4 status, $5... strategy argv
 	[ -n "$MACHINE_REPORT" ] || return 0
 	MACHINE_SEQ=$((${MACHINE_SEQ:-0} + 1))
-	printf '%s\t%s\t%s\t%s\t' "$MACHINE_SEQ" "$1" "$2" "$3" >>"$MACHINE_REPORT"
-	shift 3
+	local machine_domain="$1" machine_test="$2" machine_ipv="$3" machine_status="$4" machine_strategy=
+	shift 4
 	while [ "$#" -gt 0 ]; do
 		# POSIX-shell-safe form. Also accepted by winws2 config file wordexp().
-		printf "'%s' " "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")" >>"$MACHINE_REPORT"
+		machine_strategy="${machine_strategy}'$(printf '%s' "$1" | sed "s/'/'\\\\''/g")' "
 		shift
 	done
-	printf '\n' >>"$MACHINE_REPORT"
+	printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$MACHINE_SEQ" "$machine_domain" "$machine_test" "$machine_ipv" "$machine_status" "$machine_strategy" >>"$MACHINE_REPORT"
 }
 strategy_append_extra_pktws()
 {
@@ -1358,11 +1336,13 @@ check_domain_prolog()
 	echo "- checking without DPI bypass"
 	curl_test $1 $3 && {
 		report_append "$3" "$1 ipv${IPV}" "working without bypass"
+		machine_report_append "$3" "$1" "$IPV" not-blocked
 		[ "$SCANLEVEL" = force ] || return 1
 	}
 	code=$?
 	curl_has_reason_to_continue $code || {
 		report_append "$3" "$1 ipv${IPV}" "test aborted, no reason to continue. curl code $(curl_translate_code $code)"
+		machine_report_append "$3" "$1" "$IPV" "infra-failure:$code"
 		return 1
 	}
 	return 0
@@ -1389,7 +1369,7 @@ check_domain_http_tcp()
 		mdig_resolve_all $IPV ips $4
 		pktws_ipt_prepare_tcp $2 "$ips"
 
-		pktws_check_domain_http_bypass $1 $3 $4
+		pktws_check_domain_http_bypass $1 $3 $4 || machine_report_append "$4" "$1" "$IPV" no-strategy
 
 		echo clearing $PKTWSD redirection
 		pktws_ipt_unprepare_tcp $2
@@ -1414,7 +1394,7 @@ check_domain_http_udp()
 		mdig_resolve_all $IPV ips $3
 		pktws_ipt_prepare_udp $2 "$ips"
 
-		pktws_check_domain_http3_bypass $1 $3
+		pktws_check_domain_http3_bypass $1 $3 || machine_report_append "$3" "$1" "$IPV" no-strategy
 
 		echo clearing $PKTWSD redirection
 		pktws_ipt_unprepare_udp $2
