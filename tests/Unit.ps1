@@ -330,6 +330,8 @@ try {
     Assert-True (-not (Test-Path -LiteralPath $cleanInstall)) `
         'failed clean install rollback must remove the published tree instead of pretending to restore it (B5)'
 
+    & (Join-Path $root 'tests\PublicTextGate.ps1')
+
     Write-Host 'All unit tests passed.' -ForegroundColor Green
 }
 finally {

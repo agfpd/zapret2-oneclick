@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "baselineCommit": "fef77e99e00e6eb1bd0ab43c9af4aa7c6dad4f97",
+  "surface": {
+    "rootExtensions": [".md", ".txt"],
+    "recursiveDirectories": ["patches", "compliance"],
+    "requiredPaths": [
+      "README.md",
+      "START-HERE.txt",
+      "THIRD_PARTY_NOTICES.md",
+      "patches/README.md",
+      "compliance/README.md"
+    ]
+  },
+  "patterns": [
+    {
+      "id": "purpose-dpi",
+      "regex": "(?i)(?<![\\p{L}\\p{N}_])dpi(?![\\p{L}\\p{N}_])"
+    },
+    {
+      "id": "purpose-vpn",
+      "regex": "(?i)(?<![\\p{L}\\p{N}_])vpn(?![\\p{L}\\p{N}_])"
+    },
+    {
+      "id": "purpose-bypass",
+      "regex": "(?i)(?<![\\p{L}\\p{N}_])обход[\\p{L}]*"
+    },
+    {
+      "id": "target-youtube",
+      "regex": "(?i)(?<![\\p{L}\\p{N}_])youtube(?![\\p{L}\\p{N}_])"
+    },
+    {
+      "id": "target-discord",
+      "regex": "(?i)(?<![\\p{L}\\p{N}_])discord(?![\\p{L}\\p{N}_])"
+    }
+  ],
+  "catalogBindings": [
+    { "groupId": "youtube", "patternId": "target-youtube" },
+    { "groupId": "discord-web", "patternId": "target-discord" }
+  ],
+  "allowedOccurrences": [
+    {
+      "path": "README.md",
+      "patternId": "purpose-vpn",
+      "lineSha256": "e980efe65090c08a613116f54b393ad31b4715f2e5966c1d8a9d245c274ba1a8",
+      "count": 1,
+      "reason": "Published v1.0.5 setup-safety instruction; unchanged baseline only."
+    },
+    {
+      "path": "START-HERE.txt",
+      "patternId": "purpose-vpn",
+      "lineSha256": "a1a823bd1b9d4194e6a1fe7d916e91513822165b0f95bacfe9ee0d966adbeea1",
+      "count": 1,
+      "reason": "Published v1.0.5 setup-safety instruction; unchanged baseline only."
+    }
+  ]
+}

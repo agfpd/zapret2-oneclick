@@ -9,6 +9,8 @@ if ($lock.status -ne 'complete' -or $lock.packages.Count -eq 0) {
     throw 'Release blocked: Cygwin corresponding-source lock is incomplete.'
 }
 
+& (Join-Path $Root 'build\Test-PublicTextNeutrality.ps1') -Root $Root
+
 Import-Module (Join-Path $Root 'launcher\Zapret2OneClick.psm1') -Force
 Test-Z2OVendorManifest -SourceRoot $Root
 Write-Host 'Release inputs are ready.' -ForegroundColor Green
