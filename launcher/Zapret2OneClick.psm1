@@ -819,7 +819,12 @@ function Test-Z2OWinwsConfig {
     # temporary config containing --dry-run instead of appending it on CLI.
     $dryConfig = Join-Path (Split-Path -Parent $ConfigPath) ('dry-run-{0}.conf' -f [Guid]::NewGuid().ToString('N'))
     try {
-        @('--dry-run') + (Get-Content -LiteralPath $ConfigPath) |
+        # A dry-run validates command/config/file compatibility and exits before
+        # WinDivertOpen.  Keep production duplicate protection enabled, but do
+        # not let the validation-only process contend for the live filter's
+        # Global\winws2_arg_<filter-hash> mutex (B5).  The flag is temporary and
+        # never reaches the published service config.
+        @('--dry-run', '--wf-dup-check=0') + (Get-Content -LiteralPath $ConfigPath) |
             Set-Content -LiteralPath $dryConfig -Encoding ASCII
         $process = Start-Process -FilePath $winws -ArgumentList ('@"{0}"' -f $dryConfig) -Wait -PassThru -NoNewWindow
         if ($process.ExitCode -ne 0) {
