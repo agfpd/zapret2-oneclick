@@ -551,7 +551,16 @@ function Get-Z2ORequiredKinds {
 }
 
 function Get-Z2OProductionPenalty {
-    param([Parameter(Mandatory)][string]$Strategy)
+    # An empty strategy is a legitimate value, not missing data: Get-Z2OCommonCandidates
+    # emits a candidate with Strategy = '' and BypassRequired = $false when every required
+    # probe of a kind reports not-blocked, i.e. the transport already works without bypass.
+    # Mandatory alone rejects the empty string, so a favourable network (QUIC/TLS 1.3 not
+    # blocked) crashed the candidate sort. AllowEmptyString admits that measured value.
+    # The parameter is [object] rather than [string] on purpose: a [string] parameter coerces
+    # $null to '' during binding, which would make absent data indistinguishable from a
+    # measured "no bypass needed". [object] keeps Mandatory rejecting $null, so "measured and
+    # empty" stays distinct from "not measured" and unset input still fails closed.
+    param([Parameter(Mandatory)][AllowEmptyString()][object]$Strategy)
     # OOB candidates are useful diagnostics but can depend on blockcheck's
     # temporary SYN/range capture details. Prefer an equally stable ordinary
     # payload strategy for the long-running service.

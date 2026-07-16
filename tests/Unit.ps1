@@ -88,6 +88,66 @@ try {
     Assert-True ((Get-Z2OProductionPenalty -Strategy "'--lua-desync=oob:urp=midsld'") -gt
         (Get-Z2OProductionPenalty -Strategy "'--lua-desync=fake:blob=fake_default_tls'")) 'OOB must rank behind a stable payload strategy'
 
+    # A favourable network is the mirror of B7: B7 covers QUIC blocked and degradable,
+    # this covers QUIC not blocked at all. blockcheck then reports not-blocked and
+    # Get-Z2OCommonCandidates emits Strategy = '' with BypassRequired = $false. That empty
+    # string is a measured value, not missing data, and must survive candidate ranking.
+    Assert-True ((Get-Z2OProductionPenalty -Strategy '') -eq 0) `
+        'a not-blocked candidate carries an empty strategy and must rank without a binding error (B7 mirror)'
+    # This pair is the whole point of typing the parameter [object] instead of [string]:
+    # a [string] parameter coerces $null to '' during binding, which would silently turn
+    # absent data into a measured "no bypass needed". Keep both assertions together so a
+    # future narrowing back to [string] fails here rather than in the field.
+    $nullStrategyRejected = $false
+    try { $null = Get-Z2OProductionPenalty -Strategy $null }
+    catch { $nullStrategyRejected = $true }
+    Assert-True $nullStrategyRejected `
+        'a null strategy is absent data and must still fail closed: measured-and-empty must stay distinct from not-measured'
+
+    # Live shape observed on win-4090: TLS 1.2 blocked (ok, strategies found) while TLS 1.3
+    # and HTTP/3 both report not-blocked. The mixed report must build, rank and select.
+    $mixedGroup = [pscustomobject]@{
+        id = 'mixed'; requiredKinds = @('tls'); probeDomains = @('alpha.test', 'beta.test')
+        protocols = @('https-tls12', 'https-tls13', 'quic')
+    }
+    $mixedReport = Join-Path $temp 'mixed-machine.tsv'
+    @(
+        "1`talpha.test`tcurl_test_https_tls12`t4`tok`t'--payload=tls_client_hello'",
+        "2`tbeta.test`tcurl_test_https_tls12`t4`tok`t'--payload=tls_client_hello'",
+        "3`talpha.test`tcurl_test_https_tls12`t4`tok`t'--lua-desync=oob:pos=1'",
+        "4`tbeta.test`tcurl_test_https_tls12`t4`tok`t'--lua-desync=oob:pos=1'",
+        "5`talpha.test`tcurl_test_https_tls13`t4`tnot-blocked`t",
+        "6`tbeta.test`tcurl_test_https_tls13`t4`tnot-blocked`t",
+        "7`talpha.test`tcurl_test_http3`t4`tnot-blocked`t",
+        "8`tbeta.test`tcurl_test_http3`t4`tnot-blocked`t"
+    ) | Set-Content -LiteralPath $mixedReport -Encoding ASCII
+    $mixedRun = [pscustomobject]@{ Records = @(Read-Z2OMachineReport -Path $mixedReport) }
+    $mixedCandidates = @(Get-Z2OCandidatesFromRun -Run $mixedRun -Group $mixedGroup)
+    Assert-True (@($mixedCandidates | Where-Object { $_.Kind -eq 'quic' -and -not $_.BypassRequired -and $_.Strategy -eq '' }).Count -eq 1) `
+        'an unblocked QUIC transport must yield exactly one no-bypass candidate carrying an empty strategy'
+    $mixedPool = @(Limit-Z2OCandidatePool -Candidates $mixedCandidates -PerKind 2)
+    Assert-True (@($mixedPool | Where-Object { $_.Kind -eq 'tls' -and $_.BypassRequired }).Count -gt 0) `
+        'a mixed report must still rank the blocked TLS transport that genuinely needs a strategy'
+    Assert-True (@($mixedPool | Where-Object { $_.Kind -eq 'quic' }).Count -eq 1) `
+        'ranking a mixed ok/not-blocked report must not drop the unblocked transport'
+
+    # All transports unblocked: the installer must SUCCEED with an empty strategy set,
+    # not merely fail cleanly. no-strategy stays a separate fail-closed outcome.
+    $openReport = Join-Path $temp 'open-machine.tsv'
+    @(
+        "1`talpha.test`tcurl_test_https_tls12`t4`tnot-blocked`t",
+        "2`tbeta.test`tcurl_test_https_tls12`t4`tnot-blocked`t",
+        "3`talpha.test`tcurl_test_https_tls13`t4`tnot-blocked`t",
+        "4`tbeta.test`tcurl_test_https_tls13`t4`tnot-blocked`t",
+        "5`talpha.test`tcurl_test_http3`t4`tnot-blocked`t",
+        "6`tbeta.test`tcurl_test_http3`t4`tnot-blocked`t"
+    ) | Set-Content -LiteralPath $openReport -Encoding ASCII
+    $openRun = [pscustomobject]@{ Records = @(Read-Z2OMachineReport -Path $openReport) }
+    $openCandidates = @(Limit-Z2OCandidatePool -Candidates @(Get-Z2OCandidatesFromRun -Run $openRun -Group $mixedGroup) -PerKind 2)
+    $openStable = @(Select-Z2OStableStrategies -InstallRoot $temp -Group $mixedGroup -Candidates $openCandidates -RequiredVersions @(4))
+    Assert-True ($openStable.Count -gt 0 -and @($openStable | Where-Object BypassRequired).Count -eq 0) `
+        'a fully unblocked network must select a no-bypass set without running validation, not report no-strategy'
+
     $progressLog = Join-Path $temp 'progress.log'
     @(
         '- curl_test_https_tls12 ipv4 alpha.test : strategy-a',
